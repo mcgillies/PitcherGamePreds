@@ -9,7 +9,9 @@ New York - Mets strikeout less than Yankees (by 0.32 per game)
 Chicago - Sox strikeout less than Cubs (by 0.15 per game)
 Los Angeles - Dodgers strikeout less than Angels (by 0.64 per game)
 
-With these current strikeout rates it seems that Los Angeles would have the only **significant** effect, therefore if predicting against the dodgers reduce the prediction slightly (~ 0.3) and vice versa for the Angels
+With these current strikeout rates it seems that Los Angeles would have the only **significant** effect, therefore if predicting against the dodgers reduce the prediction slightly (~ 0.3) and vice versa for the Angels.
+
+Since pitchers do not throw every single pitch, "missing" individual pitch statistics have been imputed with the overall mean for that statistic. 
 
 
 
