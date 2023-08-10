@@ -1,5 +1,7 @@
 # PitcherGamePreds
 
+Web app [here](https://pitcher-k-preds.anvil.app/)
+
 A neural network utilized to predict starting pitcher strikeouts for indivdual games. Primarily used for strikeout props in betting. The initial dataset begins with 456 different features, including pitcher season statistics, pitcher game-by-game statistics and opposing team statistics obtained using the pybaseball scrapers. After applying PCA to reduce feature dimensionality, the dataset is reduced down to **50** features. The model created is a sequential neural network, with optimal hyperparameters determined through the hyperband algorithm.
 
 The data is than recollected after inputting the player name, team, and opposing team to produce a final prediction. The model will be updated frequently in order to maintain accuracy. 
