@@ -11,15 +11,38 @@ import numpy as np
 import pandas as pd
 
 
-def parse_game_date(date_str: str) -> datetime:
-    """Parse date string from pybaseball format."""
-    # Handle formats like "Apr 30, 2023" or "2024-04-30"
-    for fmt in ["%b %d, %Y", "%Y-%m-%d"]:
+def parse_game_date(date_val) -> datetime:
+    """Parse date from various formats."""
+    # Already a datetime
+    if isinstance(date_val, datetime):
+        return date_val
+    if isinstance(date_val, pd.Timestamp):
+        return date_val.to_pydatetime()
+
+    # String formats
+    date_str = str(date_val)
+    for fmt in ["%Y-%m-%d", "%b %d, %Y", "%Y-%m-%d %H:%M:%S"]:
         try:
-            return datetime.strptime(date_str, fmt)
+            return datetime.strptime(date_str.split()[0] if ' ' in date_str and fmt == "%Y-%m-%d" else date_str, fmt)
         except ValueError:
             continue
-    raise ValueError(f"Could not parse date: {date_str}")
+
+    # Try pandas parsing as fallback
+    try:
+        return pd.to_datetime(date_val).to_pydatetime()
+    except Exception:
+        pass
+
+    raise ValueError(f"Could not parse date: {date_val}")
+
+
+def _get_pitcher_id_col(df: pd.DataFrame) -> str:
+    """Get the best column to use for pitcher identification."""
+    # Prefer pitcher_id (from statcast) for unique identification
+    if 'pitcher_id' in df.columns:
+        return 'pitcher_id'
+    # Fall back to Name
+    return 'Name'
 
 
 def compute_rest_days(games_df: pd.DataFrame) -> pd.DataFrame:
@@ -27,19 +50,20 @@ def compute_rest_days(games_df: pd.DataFrame) -> pd.DataFrame:
     Compute days of rest since last start for each pitcher.
 
     Args:
-        games_df: DataFrame with 'Name' and 'game_date' columns
+        games_df: DataFrame with pitcher identifier and 'game_date' columns
 
     Returns:
         DataFrame with 'rest_days' column added
     """
     df = games_df.copy()
+    id_col = _get_pitcher_id_col(df)
 
     # Parse dates
     df['date_parsed'] = df['game_date'].apply(parse_game_date)
-    df = df.sort_values(['Name', 'date_parsed'])
+    df = df.sort_values([id_col, 'date_parsed'])
 
     # Compute days since last appearance for each pitcher
-    df['prev_game_date'] = df.groupby('Name')['date_parsed'].shift(1)
+    df['prev_game_date'] = df.groupby(id_col)['date_parsed'].shift(1)
     df['rest_days'] = (df['date_parsed'] - df['prev_game_date']).dt.days
 
     # Fill NaN (first appearance) with a default value
@@ -74,10 +98,11 @@ def compute_rolling_stats(
         DataFrame with rolling stat columns added
     """
     df = games_df.copy()
+    id_col = _get_pitcher_id_col(df)
 
     # Parse and sort by date
     df['date_parsed'] = df['game_date'].apply(parse_game_date)
-    df = df.sort_values(['Name', 'date_parsed'])
+    df = df.sort_values([id_col, 'date_parsed'])
 
     # Filter to only columns that exist
     available_stats = [c for c in stat_columns if c in df.columns]
@@ -87,7 +112,7 @@ def compute_rolling_stats(
             col_name = f"{stat}_roll{window}"
             # Shift by 1 to exclude current game (avoid leakage)
             df[col_name] = (
-                df.groupby('Name')[stat]
+                df.groupby(id_col)[stat]
                 .shift(1)
                 .rolling(window=window, min_periods=min_periods)
                 .mean()
@@ -116,10 +141,11 @@ def compute_season_to_date_stats(
         DataFrame with STD (season-to-date) columns added
     """
     df = games_df.copy()
+    id_col = _get_pitcher_id_col(df)
 
     # Parse and sort by date
     df['date_parsed'] = df['game_date'].apply(parse_game_date)
-    df = df.sort_values(['Name', 'date_parsed'])
+    df = df.sort_values([id_col, 'date_parsed'])
 
     available_stats = [c for c in stat_columns if c in df.columns]
 
@@ -127,7 +153,7 @@ def compute_season_to_date_stats(
         col_name = f"{stat}_std"  # season-to-date
         # Expanding mean up to (but not including) current game
         df[col_name] = (
-            df.groupby('Name')[stat]
+            df.groupby(id_col)[stat]
             .shift(1)
             .expanding(min_periods=1)
             .mean()
@@ -150,12 +176,13 @@ def compute_games_started_count(games_df: pd.DataFrame) -> pd.DataFrame:
         DataFrame with 'games_started_season' column added
     """
     df = games_df.copy()
+    id_col = _get_pitcher_id_col(df)
 
     df['date_parsed'] = df['game_date'].apply(parse_game_date)
-    df = df.sort_values(['Name', 'date_parsed'])
+    df = df.sort_values([id_col, 'date_parsed'])
 
     # Count games up to (not including) current
-    df['games_started_season'] = df.groupby('Name').cumcount()
+    df['games_started_season'] = df.groupby(id_col).cumcount()
 
     df = df.drop(columns=['date_parsed'])
 
@@ -234,14 +261,26 @@ def build_features(
     df = add_home_away(df)
 
     # Merge with opponent batting stats
+    # Use opp_abbrev if available (new format), fall back to Opp (legacy)
     print("Merging with opponent batting stats...")
+    opp_col = 'opp_abbrev' if 'opp_abbrev' in df.columns else 'Opp'
+
     df = df.merge(
         team_batting,
-        left_on='Opp',
+        left_on=opp_col,
         right_on='Team',
         how='left',
         suffixes=('', '_opp'),
     )
+
+    # Check for failed merges (unknown opponents)
+    n_missing = df['Team'].isna().sum()
+    if n_missing > 0:
+        print(f"  Warning: {n_missing} games could not be matched to opponent batting stats")
+        # Show which opponents failed
+        if opp_col in df.columns:
+            missing_opps = df.loc[df['Team'].isna(), opp_col].unique()
+            print(f"  Unmatched opponents: {list(missing_opps)[:10]}")
 
     # Target variable
     df = df.rename(columns={'SO': 'K_actual'})
@@ -259,9 +298,15 @@ def get_feature_columns(df: pd.DataFrame) -> list[str]:
     Excludes identifiers, dates, and target variable.
     """
     exclude_cols = [
+        # Identifiers
         'Name', 'Opp', 'Tm', 'Team', 'Date', 'game_date', 'date_parsed',
         'K_actual', 'mlbID', 'IDfg', 'playerid',
         '@', 'Unnamed: 6', '#days', 'Lev',
+        # Team mapping columns (legacy)
+        'team_abbrev', 'opp_abbrev', 'opp_ambiguous',
+        # Statcast columns
+        'pitcher_id', 'game_pk', 'home_team', 'away_team',
+        'player_name', 'is_home_pitcher',
     ]
 
     feature_cols = [

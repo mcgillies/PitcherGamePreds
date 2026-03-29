@@ -190,7 +190,7 @@ def main():
     # Predict command
     predict_parser = subparsers.add_parser("predict", help="Make predictions")
     predict_parser.add_argument("--pitcher", required=True, help="Pitcher name")
-    predict_parser.add_argument("--opponent", required=True, help="Opponent team city")
+    predict_parser.add_argument("--opponent", required=True, help="Opponent team abbreviation (e.g., BOS, NYY, LAD)")
     predict_parser.add_argument("--away", action="store_true", help="Pitcher is away")
     predict_parser.add_argument("--season", type=int, default=2024, help="MLB season")
 
@@ -203,6 +203,9 @@ def main():
 
     # Features command
     subparsers.add_parser("features", help="Build features only")
+
+    # Teams command
+    subparsers.add_parser("teams", help="List all team abbreviations")
 
     args = parser.parse_args()
 
@@ -230,6 +233,10 @@ def main():
 
     elif args.command == "features":
         build_features(config)
+
+    elif args.command == "teams":
+        from src.data.collect import list_teams
+        list_teams()
 
     else:
         parser.print_help()

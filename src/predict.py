@@ -92,7 +92,7 @@ class StrikeoutPredictor:
 
         Args:
             pitcher_name: Full pitcher name
-            opponent: Opponent team (city name)
+            opponent: Opponent team abbreviation (e.g., "BOS", "NYY")
             is_home: Whether pitcher is at home
 
         Returns:
@@ -120,7 +120,7 @@ class StrikeoutPredictor:
         latest = pitcher_games.iloc[[-1]].copy()
 
         # Update for new game
-        latest['Opp'] = opponent
+        latest['opp_abbrev'] = opponent
         latest['is_home'] = int(is_home)
 
         # Estimate rest days (days since last game)
@@ -133,7 +133,7 @@ class StrikeoutPredictor:
         # Merge with opponent batting stats
         opp_stats = self.team_batting[self.team_batting['Team'] == opponent]
         if opp_stats.empty:
-            raise ValueError(f"No batting data found for opponent: {opponent}")
+            raise ValueError(f"No batting data found for opponent: {opponent}. Use team abbreviation (e.g., 'BOS', 'NYY')")
 
         # Cross join (single row each)
         latest['_merge_key'] = 1
@@ -156,7 +156,7 @@ class StrikeoutPredictor:
 
         Args:
             pitcher_name: Full pitcher name (e.g., "Gerrit Cole")
-            opponent: Opponent team city (e.g., "Boston")
+            opponent: Opponent team abbreviation (e.g., "BOS", "NYY", "LAD")
             is_home: Whether pitcher is at home
 
         Returns:
@@ -227,7 +227,7 @@ def predict_game(
 
     Args:
         pitcher_name: Full pitcher name
-        opponent: Opponent team city
+        opponent: Opponent team abbreviation (e.g., "BOS", "NYY")
         model_path: Path to saved model
         preprocessor_path: Path to saved preprocessor
         is_home: Whether pitcher is at home
@@ -249,18 +249,18 @@ if __name__ == "__main__":
 
     predictor.load_current_data(season=2024)
 
-    # Single prediction
+    # Single prediction (use team abbreviations)
     pred = predictor.predict(
         pitcher_name="Gerrit Cole",
-        opponent="Boston",
+        opponent="BOS",  # Boston Red Sox
         is_home=True,
     )
     print(f"Predicted strikeouts: {pred:.1f}")
 
     # Batch predictions
     matchups = [
-        {"pitcher": "Gerrit Cole", "opponent": "Boston", "is_home": True},
-        {"pitcher": "Zack Wheeler", "opponent": "Atlanta", "is_home": False},
+        {"pitcher": "Gerrit Cole", "opponent": "BOS", "is_home": True},
+        {"pitcher": "Zack Wheeler", "opponent": "ATL", "is_home": False},
     ]
 
     results = predictor.predict_batch(matchups)
