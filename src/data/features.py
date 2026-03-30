@@ -10,30 +10,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
-def parse_game_date(date_val) -> datetime:
-    """Parse date from various formats."""
-    # Already a datetime
-    if isinstance(date_val, datetime):
-        return date_val
-    if isinstance(date_val, pd.Timestamp):
-        return date_val.to_pydatetime()
-
-    # String formats
-    date_str = str(date_val)
-    for fmt in ["%Y-%m-%d", "%b %d, %Y", "%Y-%m-%d %H:%M:%S"]:
-        try:
-            return datetime.strptime(date_str.split()[0] if ' ' in date_str and fmt == "%Y-%m-%d" else date_str, fmt)
-        except ValueError:
-            continue
-
-    # Try pandas parsing as fallback
-    try:
-        return pd.to_datetime(date_val).to_pydatetime()
-    except Exception:
-        pass
-
-    raise ValueError(f"Could not parse date: {date_val}")
+# Use mlb_data utilities
+from mlb_data.utils import parse_date as parse_game_date
 
 
 def _get_pitcher_id_col(df: pd.DataFrame) -> str:

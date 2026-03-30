@@ -11,18 +11,19 @@ import numpy as np
 import pandas as pd
 from tensorflow import keras
 
-from .data.collect import (
-    collect_pitcher_game_logs,
-    collect_pitcher_season_stats,
-    collect_team_batting,
+# Use mlb_data package for data collection
+from mlb_data import (
+    get_pitcher_game_logs,
+    get_team_batting,
+    ALL_TEAMS,
 )
+from mlb_data.utils import parse_date as parse_game_date
+
 from .data.features import (
-    add_home_away,
     compute_games_started_count,
     compute_rest_days,
     compute_rolling_stats,
     compute_season_to_date_stats,
-    get_feature_columns,
 )
 from .data.preprocess import DataPreprocessor
 
@@ -66,17 +67,17 @@ class StrikeoutPredictor:
 
         print(f"Loading data for {season} season...")
 
-        # Get team batting stats
-        self.team_batting = collect_team_batting(season)
+        # Get team batting stats using mlb_data
+        self.team_batting = get_team_batting(season)
 
-        # Get recent pitcher game logs (last 30 days for rolling stats)
+        # Get recent pitcher game logs (last 60 days for rolling stats)
         end_date = datetime.now().strftime('%Y-%m-%d')
         start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
 
-        self.pitcher_history = collect_pitcher_game_logs(
+        self.pitcher_history = get_pitcher_game_logs(
             start_date=start_date,
             end_date=end_date,
-            delay_seconds=2.0,
+            starters_only=False,  # Include all appearances for history
         )
 
         print(f"Loaded {len(self.team_batting)} teams, {len(self.pitcher_history)} pitcher games")
@@ -125,7 +126,6 @@ class StrikeoutPredictor:
 
         # Estimate rest days (days since last game)
         if 'game_date' in latest.columns:
-            from .data.features import parse_game_date
             last_game = parse_game_date(latest['game_date'].iloc[0])
             rest = (datetime.now() - last_game).days
             latest['rest_days'] = min(rest, 30)

@@ -235,7 +235,7 @@ def main():
         build_features(config)
 
     elif args.command == "teams":
-        from src.data.collect import list_teams
+        from mlb_data import list_teams
         list_teams()
 
     else:
