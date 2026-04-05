@@ -86,14 +86,18 @@ class GamePredictorBinary:
         pitcher_id: int,
         season: int | None = None,
         default_bf: int = 24,
+        default_bf_per_ip: float = 4.3,
         min_starts: int = 5,
         starter_pitch_threshold: int = 65,
-    ) -> float:
+    ) -> tuple[float, float]:
         """
-        Get expected batters faced using median of recent starts.
+        Get expected batters faced and pitcher-specific BF/IP ratio.
 
         Uses pitch count to identify starter appearances (>= starter_pitch_threshold).
         Falls back to all appearances if no starter games found (for true relievers).
+
+        Returns:
+            Tuple of (expected_bf, bf_per_ip_ratio)
         """
         try:
             game_logs = get_pitcher_game_logs(
@@ -103,46 +107,137 @@ class GamePredictorBinary:
             )
 
             # First, try to find starter appearances (high pitch count)
-            starter_bf = [
-                g["batters_faced"] for g in game_logs
+            starter_games = [
+                g for g in game_logs
                 if g.get("batters_faced") and g.get("pitches_thrown", 0) >= starter_pitch_threshold
             ]
 
             # Check previous season for more starter appearances if needed
-            if len(starter_bf) < min_starts and season:
+            if len(starter_games) < min_starts and season:
                 prev_logs = get_pitcher_game_logs(
                     pitcher_id,
                     season=season - 1,
                     limit=self.rolling_starts,
                 )
-                starter_bf.extend([
-                    g["batters_faced"] for g in prev_logs
+                starter_games.extend([
+                    g for g in prev_logs
                     if g.get("batters_faced") and g.get("pitches_thrown", 0) >= starter_pitch_threshold
                 ])
 
             # If we found starter appearances, use those
-            if starter_bf:
-                return float(np.median(starter_bf))
+            if starter_games:
+                bf_values = [g["batters_faced"] for g in starter_games]
+                expected_bf = float(np.median(bf_values))
+
+                # Calculate pitcher-specific BF/IP ratio
+                bf_per_ip = self._calculate_bf_per_ip(starter_games, default_bf_per_ip)
+
+                return expected_bf, bf_per_ip
 
             # Fallback: use all appearances (for true relievers/openers)
-            bf_values = [g["batters_faced"] for g in game_logs if g.get("batters_faced")]
+            all_games = [g for g in game_logs if g.get("batters_faced")]
 
-            if len(bf_values) < min_starts and season:
+            if len(all_games) < min_starts and season:
                 prev_logs = get_pitcher_game_logs(
                     pitcher_id,
                     season=season - 1,
-                    limit=self.rolling_starts - len(bf_values),
+                    limit=self.rolling_starts - len(all_games),
                 )
-                bf_values.extend([g["batters_faced"] for g in prev_logs if g.get("batters_faced")])
+                all_games.extend([g for g in prev_logs if g.get("batters_faced")])
 
-            if not bf_values:
-                return default_bf
+            if not all_games:
+                return default_bf, default_bf_per_ip
 
-            return float(np.median(bf_values))
+            bf_values = [g["batters_faced"] for g in all_games]
+            expected_bf = float(np.median(bf_values))
+            bf_per_ip = self._calculate_bf_per_ip(all_games, default_bf_per_ip)
+
+            return expected_bf, bf_per_ip
 
         except Exception as e:
             print(f"Warning: Could not get game logs for pitcher {pitcher_id}: {e}")
-            return default_bf
+            return default_bf, default_bf_per_ip
+
+    def _calculate_bf_per_ip(
+        self,
+        games: list[dict],
+        default: float = 4.3,
+    ) -> float:
+        """Calculate pitcher's BF/IP ratio from game logs."""
+        total_bf = 0
+        total_ip = 0.0
+
+        for g in games:
+            bf = g.get("batters_faced")
+            ip_str = g.get("innings_pitched")
+
+            if bf and ip_str:
+                total_bf += bf
+                # Convert IP string (e.g., "5.2" means 5 2/3) to float
+                try:
+                    ip = float(ip_str)
+                    # Handle fractional innings (5.1 = 5 1/3, 5.2 = 5 2/3)
+                    whole = int(ip)
+                    frac = ip - whole
+                    if frac > 0:
+                        ip = whole + (frac * 10 / 3)
+                    total_ip += ip
+                except (ValueError, TypeError):
+                    continue
+
+        if total_ip > 0:
+            return total_bf / total_ip
+
+        return default
+
+    def get_lineup_xwoba_factor(
+        self,
+        lineup: list[dict],
+        season: int,
+        league_avg_xwoba: float = 0.315,
+    ) -> float:
+        """
+        Calculate lineup's xwOBA factor relative to league average.
+
+        Higher xwOBA = more baserunners = more batters faced per inning.
+        """
+        xwoba_values = []
+
+        for batter in lineup[:9]:
+            batter_id = batter.get("batter_id")
+            if not batter_id:
+                continue
+
+            # Look up batter's xwOBA from profiles
+            has_season = "season" in self.batter_profiles.columns
+
+            if has_season:
+                mask = (
+                    (self.batter_profiles["batter_id"] == batter_id) &
+                    (self.batter_profiles["season"] == season)
+                )
+                batter_data = self.batter_profiles[mask]
+
+                if batter_data.empty:
+                    mask = (
+                        (self.batter_profiles["batter_id"] == batter_id) &
+                        (self.batter_profiles["season"] == season - 1)
+                    )
+                    batter_data = self.batter_profiles[mask]
+            else:
+                mask = self.batter_profiles["batter_id"] == batter_id
+                batter_data = self.batter_profiles[mask]
+
+            if not batter_data.empty and "xwoba" in batter_data.columns:
+                xwoba = batter_data["xwoba"].values[0]
+                if pd.notna(xwoba):
+                    xwoba_values.append(xwoba)
+
+        if not xwoba_values:
+            return 1.0  # Neutral factor if no data
+
+        lineup_xwoba = np.mean(xwoba_values)
+        return lineup_xwoba / league_avg_xwoba
 
     def build_matchup_features(
         self,
@@ -286,13 +381,17 @@ class GamePredictorBinary:
         Returns:
             Prediction dict with expected stats and per-batter breakdown
         """
-        if expected_bf is None:
-            expected_bf = self.get_expected_batters_faced(pitcher_id, season)
+        # Get pitcher's baseline expected BF and their personal BF/IP ratio
+        baseline_bf, bf_per_ip = self.get_expected_batters_faced(pitcher_id, season)
 
-        # Convert expected_bf to target_innings if not provided
-        # Rough estimate: ~4.3 BF per inning on average
+        if expected_bf is None:
+            # Adjust for opposing lineup quality
+            xwoba_factor = self.get_lineup_xwoba_factor(lineup, season)
+            expected_bf = baseline_bf * xwoba_factor
+
+        # Convert expected_bf to target_innings using pitcher-specific ratio
         if target_innings is None:
-            target_innings = expected_bf / 4.3
+            target_innings = expected_bf / bf_per_ip
 
         # Get predictions for each lineup spot (first time through)
         # Build per-batter probability arrays for Markov simulation
@@ -391,10 +490,14 @@ class GamePredictorBinary:
         adjusted_runs = sim_stats["runs"] * park_factor
 
         # Build result using simulation stats
+        xwoba_factor = self.get_lineup_xwoba_factor(lineup, season)
         result = {
             "pitcher_id": pitcher_id,
             "pitcher_name": pitcher_name,
+            "baseline_bf": round(baseline_bf, 1),
+            "xwoba_factor": round(xwoba_factor, 3),
             "expected_bf": round(expected_bf, 1),
+            "bf_per_ip": round(bf_per_ip, 2),
             "target_innings": round(target_innings, 1),
             "actual_bf_modeled": len([b for b in batter_info if not b.get("use_default")]),
             "missing_batters": missing_batters,
