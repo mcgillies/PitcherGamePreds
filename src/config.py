@@ -4,16 +4,21 @@ Central configuration for PitcherGamePreds project.
 All date ranges, seasons, and model parameters defined here.
 """
 
+import datetime
+
 # Seasons to collect data for
 SEASONS = [2021, 2022, 2023, 2024]
 
 # Full data range for Statcast pitch data
 DATA_START = "2021-04-01"
-DATA_END = "2024-09-30"
+
+# Set DATA_END to today:
+
+DATA_END = datetime.datetime.today().strftime("%Y-%m-%d")
 
 # Temporal split dates (for train/val/test)
-VAL_DATE = "2024-07-01"
-TEST_DATE = "2024-08-15"
+VAL_DATE = "2025-06-01"
+TEST_DATE = "2025-07-15"
 
 # Rolling window sizes
 PITCHER_ROLLING_WINDOWS = [5, 10, 20]    # By starts

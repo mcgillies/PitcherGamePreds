@@ -111,21 +111,46 @@ class MatchupPreprocessor:
         print("  Merging features...")
         matchups = pa_features.copy()
 
-        # Add pitcher profile (season-level)
-        matchups = matchups.merge(
-            pitcher_profiles.add_prefix('p_'),
-            left_on='pitcher_id',
-            right_on='p_pitcher_id',
-            how='left'
-        )
+        # Extract season from game_date for profile matching
+        matchups['season'] = pd.to_datetime(matchups['game_date']).dt.year
 
-        # Add batter profile (season-level)
-        matchups = matchups.merge(
-            batter_profiles.add_prefix('b_'),
-            left_on='batter_id',
-            right_on='b_batter_id',
-            how='left'
-        )
+        # Add pitcher profile (by season - captures arsenal changes over time)
+        pitcher_profiles_prefixed = pitcher_profiles.add_prefix('p_')
+        if 'p_season' in pitcher_profiles_prefixed.columns:
+            # Join on pitcher_id AND season
+            matchups = matchups.merge(
+                pitcher_profiles_prefixed,
+                left_on=['pitcher_id', 'season'],
+                right_on=['p_pitcher_id', 'p_season'],
+                how='left'
+            )
+        else:
+            # Fallback for old format without season
+            matchups = matchups.merge(
+                pitcher_profiles_prefixed,
+                left_on='pitcher_id',
+                right_on='p_pitcher_id',
+                how='left'
+            )
+
+        # Add batter profile (by season)
+        batter_profiles_prefixed = batter_profiles.add_prefix('b_')
+        if 'b_season' in batter_profiles_prefixed.columns:
+            # Join on batter_id AND season
+            matchups = matchups.merge(
+                batter_profiles_prefixed,
+                left_on=['batter_id', 'season'],
+                right_on=['b_batter_id', 'b_season'],
+                how='left'
+            )
+        else:
+            # Fallback for old format without season
+            matchups = matchups.merge(
+                batter_profiles_prefixed,
+                left_on='batter_id',
+                right_on='b_batter_id',
+                how='left'
+            )
 
         # Add pitcher rolling stats
         if pitcher_rolling is not None:
@@ -428,7 +453,7 @@ class MatchupPreprocessor:
         exclude_cols = {
             # Identifiers
             'pitcher_id', 'batter_id', 'game_pk', 'game_date', 'at_bat_number',
-            'p_pitcher_id', 'b_batter_id',
+            'p_pitcher_id', 'b_batter_id', 'season', 'p_season', 'b_season',
             # Names
             'pitcher_name', 'batter_name', 'p_pitcher_name', 'b_batter_name',
             # Raw handedness (encoded separately)

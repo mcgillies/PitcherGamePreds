@@ -9,7 +9,14 @@ pybaseball>=2.2.0
 scikit-learn>=1.3.0
 tensorflow>=2.13.0
 
-# Optional: hyperparameter tuning
+# FLAML AutoML (null-tolerant tree models)
+flaml[automl]>=2.0.0
+lightgbm>=4.0.0
+xgboost>=2.0.0
+catboost>=1.2.0
+shap>=0.45.0
+
+# Optional: hyperparameter tuning (for neural network)
 keras-tuner>=1.4.0
 
 # Development
