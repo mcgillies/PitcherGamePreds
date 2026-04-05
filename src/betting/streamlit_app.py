@@ -333,19 +333,32 @@ def render_history():
 
                 # Settlement form
                 st.divider()
-                with st.form(key=f"settle_{bet.id}"):
-                    actual = st.number_input(
-                        f"Actual {bet.prop_type} result",
-                        min_value=0.0,
-                        step=1.0,
-                        key=f"actual_{bet.id}"
-                    )
-                    submitted = st.form_submit_button("Settle Bet")
+                col_settle, col_cancel = st.columns(2)
 
-                    if submitted:
-                        result = database.settle_bet(bet.id, actual)
-                        st.success(f"Bet settled: {result['status'].upper()} (P&L: ${result['pnl']:+.2f})")
-                        st.rerun()
+                with col_settle:
+                    with st.form(key=f"settle_{bet.id}"):
+                        actual = st.number_input(
+                            f"Actual {bet.prop_type} result",
+                            min_value=0.0,
+                            step=1.0,
+                            key=f"actual_{bet.id}"
+                        )
+                        submitted = st.form_submit_button("Settle Bet")
+
+                        if submitted:
+                            result = database.settle_bet(bet.id, actual)
+                            st.success(f"Bet settled: {result['status'].upper()} (P&L: ${result['pnl']:+.2f})")
+                            st.rerun()
+
+                with col_cancel:
+                    with st.form(key=f"cancel_{bet.id}"):
+                        st.write("Pitcher scratched?")
+                        cancel_submitted = st.form_submit_button("Cancel & Refund")
+
+                        if cancel_submitted:
+                            refund = database.cancel_bet(bet.id)
+                            st.success(f"Bet cancelled. ${refund:.2f} refunded.")
+                            st.rerun()
 
     # All bets table
     st.subheader("All Bets")
