@@ -385,6 +385,37 @@ def get_pending_bets() -> list[Bet]:
     return get_bets(status=BetStatus.PENDING)
 
 
+def cancel_bet(bet_id: int) -> float:
+    """Cancel a pending bet and refund the stake. Returns refunded amount."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM bets WHERE id = ?", (bet_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise ValueError(f"Bet {bet_id} not found")
+
+    if row["status"] != "pending":
+        conn.close()
+        raise ValueError(f"Bet {bet_id} is not pending (status: {row['status']})")
+
+    stake = row["stake"]
+
+    # Update bet status
+    cursor.execute("UPDATE bets SET status = ? WHERE id = ?", (BetStatus.CANCELLED.value, bet_id))
+
+    # Refund stake
+    cursor.execute("SELECT balance FROM bankroll_history ORDER BY id DESC LIMIT 1")
+    current = cursor.fetchone()["balance"]
+    update_bankroll(current + stake, stake, f"Bet #{bet_id} cancelled (refund)", conn)
+
+    conn.commit()
+    conn.close()
+
+    return stake
+
+
 def get_bankroll_history() -> list[dict]:
     """Get bankroll history for charting."""
     conn = get_connection()
