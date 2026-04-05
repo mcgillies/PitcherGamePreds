@@ -37,6 +37,7 @@ class GamePredictorBinary:
         batter_rolling_path: str = "data/profiles/batter_rolling.csv",
         park_factors_path: str = "data/profiles/park_factors.csv",
         rolling_starts: int = 10,
+        xwoba_sensitivity: float = 0.3,
     ):
         """
         Initialize game predictor.
@@ -50,11 +51,13 @@ class GamePredictorBinary:
             batter_rolling_path: Path to batter rolling stats
             park_factors_path: Path to park factors CSV
             rolling_starts: Number of recent starts for BF average
+            xwoba_sensitivity: How much lineup xwOBA affects IP projection (0-1, default 0.5)
         """
         self.ensemble_dir = Path(ensemble_dir)
         self.ensemble = BinaryModelEnsemble.load(self.ensemble_dir)
         self.preprocessor = MatchupPreprocessor.load(preprocessor_path)
         self.rolling_starts = rolling_starts
+        self.xwoba_sensitivity = xwoba_sensitivity
 
         # Load profiles
         self.pitcher_profiles = pd.read_csv(pitcher_profiles_path)
@@ -383,15 +386,18 @@ class GamePredictorBinary:
         """
         # Get pitcher's baseline expected BF and their personal BF/IP ratio
         baseline_bf, bf_per_ip = self.get_expected_batters_faced(pitcher_id, season)
+        xwoba_factor = self.get_lineup_xwoba_factor(lineup, season)
 
         if expected_bf is None:
-            # Adjust for opposing lineup quality
-            xwoba_factor = self.get_lineup_xwoba_factor(lineup, season)
-            expected_bf = baseline_bf * xwoba_factor
+            expected_bf = baseline_bf  # Pitcher's workload stays constant
 
-        # Convert expected_bf to target_innings using pitcher-specific ratio
+        # Convert expected_bf to target_innings
+        # Adjust BF/IP ratio for lineup quality: tougher lineup = more BF per inning = fewer IP
+        # Sensitivity dampens the effect (0 = no effect, 1 = full effect)
         if target_innings is None:
-            target_innings = expected_bf / bf_per_ip
+            dampened_factor = 1 + (xwoba_factor - 1) * self.xwoba_sensitivity
+            adjusted_bf_per_ip = bf_per_ip * dampened_factor
+            target_innings = expected_bf / adjusted_bf_per_ip
 
         # Get predictions for each lineup spot (first time through)
         # Build per-batter probability arrays for Markov simulation
@@ -490,14 +496,16 @@ class GamePredictorBinary:
         adjusted_runs = sim_stats["runs"] * park_factor
 
         # Build result using simulation stats
-        xwoba_factor = self.get_lineup_xwoba_factor(lineup, season)
+        dampened_factor = 1 + (xwoba_factor - 1) * self.xwoba_sensitivity
+        adjusted_bf_per_ip = bf_per_ip * dampened_factor
         result = {
             "pitcher_id": pitcher_id,
             "pitcher_name": pitcher_name,
             "baseline_bf": round(baseline_bf, 1),
-            "xwoba_factor": round(xwoba_factor, 3),
-            "expected_bf": round(expected_bf, 1),
             "bf_per_ip": round(bf_per_ip, 2),
+            "xwoba_factor": round(xwoba_factor, 3),
+            "adjusted_bf_per_ip": round(adjusted_bf_per_ip, 2),
+            "expected_bf": round(expected_bf, 1),
             "target_innings": round(target_innings, 1),
             "actual_bf_modeled": len([b for b in batter_info if not b.get("use_default")]),
             "missing_batters": missing_batters,
