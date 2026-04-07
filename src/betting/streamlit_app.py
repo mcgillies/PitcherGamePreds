@@ -267,6 +267,92 @@ def render_today():
     elif filtered_props:
         st.info("No value bets found with current criteria.")
 
+    # Manual bet entry
+    st.subheader("Place Custom Bet")
+
+    # Build pitcher options from predictions
+    pitcher_options = {}
+    for game in predictions:
+        if game.get("away_prediction"):
+            p = game["away_prediction"]
+            label = f"{p['pitcher_name']} ({game['away_team']} @ {game['home_team']})"
+            pitcher_options[label] = {
+                "pitcher_name": p["pitcher_name"],
+                "home_team": game["home_team"],
+                "away_team": game["away_team"],
+                "prediction": p,
+            }
+        if game.get("home_prediction"):
+            p = game["home_prediction"]
+            label = f"{p['pitcher_name']} ({game['away_team']} @ {game['home_team']})"
+            pitcher_options[label] = {
+                "pitcher_name": p["pitcher_name"],
+                "home_team": game["home_team"],
+                "away_team": game["away_team"],
+                "prediction": p,
+            }
+
+    if pitcher_options:
+        with st.form(key="custom_bet_form"):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                selected_pitcher = st.selectbox("Pitcher", list(pitcher_options.keys()))
+                prop_type = st.selectbox("Prop Type", ["strikeouts", "hits_allowed", "earned_runs"])
+                line = st.number_input("Line", min_value=0.0, value=5.5, step=0.5)
+
+            with col2:
+                side = st.selectbox("Side", ["over", "under"])
+                odds = st.number_input("Odds (American)", value=-110, step=5)
+                stake = st.number_input("Stake ($)", min_value=0.01, value=1.0, step=0.25)
+
+            # Show model prediction for context
+            if selected_pitcher:
+                info = pitcher_options[selected_pitcher]
+                pred = info["prediction"]
+                stat_map = {"strikeouts": "K", "hits_allowed": "H", "earned_runs": "ER"}
+                model_val = pred["expected_stats"].get(stat_map.get(prop_type, "K"), "?")
+                st.caption(f"Model prediction: {model_val}")
+
+            submitted = st.form_submit_button("Place Bet", type="primary")
+
+            if submitted:
+                info = pitcher_options[selected_pitcher]
+                pred = info["prediction"]
+                stat_map = {"strikeouts": "K", "hits_allowed": "H", "earned_runs": "ER"}
+                model_pred = pred["expected_stats"].get(stat_map.get(prop_type, "K"), 0)
+
+                # Calculate edge
+                if side == "over":
+                    edge = model_pred - line
+                else:
+                    edge = line - model_pred
+
+                bet = Bet(
+                    id=None,
+                    created_at=datetime.now(),
+                    game_date=date.today().isoformat(),
+                    pitcher_name=info["pitcher_name"],
+                    prop_type=prop_type,
+                    line=line,
+                    side=BetSide(side),
+                    odds=odds,
+                    stake=stake,
+                    model_prediction=model_pred,
+                    model_edge=edge,
+                    bookmaker="manual",
+                    status=BetStatus.PENDING,
+                    actual_result=None,
+                    pnl=None,
+                    home_team=info["home_team"],
+                    away_team=info["away_team"],
+                )
+                bet_id = database.add_bet(bet)
+                st.success(f"Bet #{bet_id} placed! ${stake:.2f} on {info['pitcher_name']} {prop_type} {side} {line}")
+                st.rerun()
+    else:
+        st.info("Load predictions first to place custom bets.")
+
     # All predictions
     st.subheader("All Predictions")
 
