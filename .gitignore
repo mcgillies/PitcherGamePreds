@@ -168,3 +168,6 @@ bet365-scraper/
 
 # Data files (too large for git)
 data/
+
+# Pipeline logs
+logs/
