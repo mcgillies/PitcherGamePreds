@@ -3,8 +3,8 @@
 Daily data pipeline for pitcher predictions.
 
 Updates:
-1. Raw data (pitcher game logs, team batting)
-2. Pitcher/batter profiles from Statcast
+1. Statcast pitch data (incremental)
+2. Pitcher/batter profiles
 3. Rolling stats
 4. Optionally retrains models
 
@@ -37,50 +37,6 @@ cache.enable()
 def log(msg: str):
     """Print timestamped log message."""
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
-
-
-def update_raw_data(seasons: list[int] = None):
-    """Update raw pitcher game logs and team batting data."""
-    from src.data.collect import collect_pitcher_game_logs, collect_team_batting
-
-    if seasons is None:
-        seasons = [datetime.now().year]
-
-    log(f"Updating raw data for seasons: {seasons}")
-
-    # Pitcher game logs
-    all_logs = []
-    for season in seasons:
-        start = f"{season}-03-01"
-        end = f"{season}-11-01" if season < datetime.now().year else datetime.now().strftime("%Y-%m-%d")
-        log(f"  Fetching pitcher logs {start} to {end}...")
-        try:
-            logs = collect_pitcher_game_logs(start, end)
-            all_logs.append(logs)
-        except Exception as e:
-            log(f"  Warning: Could not fetch logs for {season}: {e}")
-
-    if all_logs:
-        pitcher_games = pd.concat(all_logs, ignore_index=True)
-        output_path = PROJECT_ROOT / "data" / "raw" / "pitcher_games.csv"
-        pitcher_games.to_csv(output_path, index=False)
-        log(f"  Saved {len(pitcher_games)} pitcher game logs to {output_path}")
-
-    # Team batting
-    all_batting = []
-    for season in seasons:
-        log(f"  Fetching team batting for {season}...")
-        try:
-            batting = collect_team_batting(season)
-            all_batting.append(batting)
-        except Exception as e:
-            log(f"  Warning: Could not fetch batting for {season}: {e}")
-
-    if all_batting:
-        team_batting = pd.concat(all_batting, ignore_index=True)
-        output_path = PROJECT_ROOT / "data" / "raw" / "team_batting.csv"
-        team_batting.to_csv(output_path, index=False)
-        log(f"  Saved {len(team_batting)} team batting rows to {output_path}")
 
 
 def update_statcast_profiles(end_date: str = None):
@@ -540,8 +496,6 @@ def restart_streamlit_app():
 def main():
     parser = argparse.ArgumentParser(description="Daily data pipeline")
     parser.add_argument("--retrain", action="store_true", help="Retrain models after data update")
-    parser.add_argument("--seasons", nargs="+", type=int, help="Seasons to update (default: current year)")
-    parser.add_argument("--skip-raw", action="store_true", help="Skip raw data update")
     parser.add_argument("--skip-profiles", action="store_true", help="Skip Statcast profiles update")
     parser.add_argument("--skip-rolling", action="store_true", help="Skip rolling stats update")
     args = parser.parse_args()
@@ -550,14 +504,9 @@ def main():
     log("Starting daily pipeline")
     log("=" * 60)
 
-    seasons = args.seasons or [datetime.now().year]
-
     pitches_data = None
 
     try:
-        if not args.skip_raw:
-            update_raw_data(seasons)
-
         if not args.skip_profiles:
             pitches_data = update_statcast_profiles()
 
