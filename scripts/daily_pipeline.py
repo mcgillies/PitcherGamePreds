@@ -9,9 +9,12 @@ Updates:
 4. Optionally retrains models
 
 Run with: python scripts/daily_pipeline.py [--retrain]
+
+Memory-optimized for 8GB RAM systems.
 """
 
 import argparse
+import gc
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -32,6 +35,17 @@ from src.config import PITCHER_ROLLING_WINDOWS, BATTER_ROLLING_WINDOWS
 
 # Enable pybaseball cache
 cache.enable()
+
+
+def clear_mem():
+    """Run garbage collection and log memory."""
+    gc.collect()
+    try:
+        import psutil
+        mem_gb = psutil.Process().memory_info().rss / 1024**3
+        log(f"  [Memory: {mem_gb:.2f} GB]")
+    except ImportError:
+        pass
 
 
 def log(msg: str):
@@ -123,20 +137,23 @@ def update_statcast_profiles(end_date: str = None):
         log("  No Statcast data available")
         return None
 
+    # Convert game_date to string once (in place, no copy)
+    log("  Preparing data for profile generation...")
+    data['game_date'] = pd.to_datetime(data['game_date']).dt.strftime('%Y-%m-%d')
+    clear_mem()
+
     # Build pitcher profiles using mlb_data (rich features) from FULL dataset
     log("  Building pitcher profiles (rich features) from full dataset...")
     try:
-        # Convert game_date to string for mlb_data functions
-        data_for_profiles = data.copy()
-        data_for_profiles['game_date'] = pd.to_datetime(data_for_profiles['game_date']).dt.strftime('%Y-%m-%d')
-
         pitcher_profiles = get_pitcher_arsenal(
             DATA_START, end_date,
             min_pitches=100,  # Higher threshold for multi-year data
-            pitches_df=data_for_profiles
+            pitches_df=data
         )
         pitcher_profiles.to_csv(output_dir / "pitcher_arsenal.csv", index=False)
         log(f"  Saved {len(pitcher_profiles)} pitcher profiles with {len(pitcher_profiles.columns)} columns")
+        del pitcher_profiles
+        clear_mem()
     except Exception as e:
         log(f"  Error building pitcher profiles: {e}")
         import traceback
@@ -148,22 +165,28 @@ def update_statcast_profiles(end_date: str = None):
         batter_profiles = get_batter_pitch_stats(
             DATA_START, end_date,
             min_pitches=100,  # Higher threshold for multi-year data
-            pitches_df=data_for_profiles
+            pitches_df=data
         )
         batter_profiles.to_csv(output_dir / "batter_profiles.csv", index=False)
         log(f"  Saved {len(batter_profiles)} batter profiles with {len(batter_profiles.columns)} columns")
+        del batter_profiles
+        clear_mem()
     except Exception as e:
         log(f"  Error building batter profiles: {e}")
         import traceback
         traceback.print_exc()
 
-    # Save plate appearances for rolling stats (full dataset)
+    # Save plate appearances for rolling stats (filter without copy)
     log("  Saving plate appearances...")
-    pa_data = data[data['events'].notna()].copy()
-    pa_data.to_parquet(output_dir / "plate_appearances.parquet", index=False)
-    log(f"  Saved {len(pa_data):,} plate appearances")
+    pa_mask = data['events'].notna()
+    data[pa_mask].to_parquet(output_dir / "plate_appearances.parquet", index=False)
+    log(f"  Saved {pa_mask.sum():,} plate appearances")
+    del pa_mask
+    clear_mem()
 
-    return data  # Return for rolling stats computation
+    # Don't return full data - let caller reload if needed
+    # This allows memory to be freed
+    return None
 
 
 def compute_pitcher_rolling_latest(pitches_df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
@@ -172,7 +195,7 @@ def compute_pitcher_rolling_latest(pitches_df: pd.DataFrame, windows: list[int])
 
     Returns one row per pitcher with their most recent rolling averages.
     """
-    df = pitches_df.copy()
+    df = pitches_df  # No copy - work with original
 
     # Get unique pitcher-game combinations (starts)
     starts = df.groupby(['pitcher', 'game_date']).agg(
@@ -250,7 +273,7 @@ def compute_batter_rolling_latest(pitches_df: pd.DataFrame, windows: list[int]) 
 
     Returns one row per batter with their most recent rolling averages.
     """
-    df = pitches_df.copy()
+    df = pitches_df  # No copy - work with original
 
     # Get unique batter-game combinations
     games = df.groupby(['batter', 'game_date']).agg(
@@ -335,29 +358,32 @@ def update_rolling_stats(pitches_df: pd.DataFrame = None):
 
     profiles_dir = PROJECT_ROOT / "data" / "profiles"
 
-    # Load pitches data if not provided
-    if pitches_df is None:
-        pa_path = profiles_dir / "plate_appearances.parquet"
-        if not pa_path.exists():
-            log("  No plate appearances data found, skipping rolling stats")
-            return
+    # Always load from plate_appearances.parquet for rolling stats
+    # This ensures we use the filtered PA data, not full pitches
+    pa_path = profiles_dir / "plate_appearances.parquet"
+    if not pa_path.exists():
+        log("  No plate appearances data found, skipping rolling stats")
+        return
 
-        pitches_df = pd.read_parquet(pa_path)
-        log(f"  Loaded {len(pitches_df)} plate appearances")
-    else:
-        log(f"  Using provided pitch data: {len(pitches_df)} pitches")
+    pitches_df = pd.read_parquet(pa_path)
+    log(f"  Loaded {len(pitches_df):,} plate appearances")
+    clear_mem()
 
     # Calculate pitcher rolling stats with proper windows
     log(f"  Calculating pitcher rolling stats (windows: {PITCHER_ROLLING_WINDOWS})...")
     pitcher_rolling = compute_pitcher_rolling_latest(pitches_df, PITCHER_ROLLING_WINDOWS)
     pitcher_rolling.to_csv(profiles_dir / "pitcher_rolling.csv", index=False)
     log(f"  Saved {len(pitcher_rolling)} pitcher rolling stats with {len(pitcher_rolling.columns)} columns")
+    del pitcher_rolling
+    clear_mem()
 
     # Calculate batter rolling stats with proper windows
     log(f"  Calculating batter rolling stats (windows: {BATTER_ROLLING_WINDOWS})...")
     batter_rolling = compute_batter_rolling_latest(pitches_df, BATTER_ROLLING_WINDOWS)
     batter_rolling.to_csv(profiles_dir / "batter_rolling.csv", index=False)
     log(f"  Saved {len(batter_rolling)} batter rolling stats with {len(batter_rolling.columns)} columns")
+    del batter_rolling, pitches_df
+    clear_mem()
 
 
 
@@ -384,7 +410,7 @@ def retrain_models():
     from src.model.train_binary_models import BinaryModelEnsemble, prepare_features
     from src.data.preprocess import MatchupPreprocessor
 
-    # Load raw pitches
+    # Load raw pitches - only columns needed for matchup building
     pitches_path = PROJECT_ROOT / "data" / "raw" / "pitches.parquet"
     if not pitches_path.exists():
         log("  No pitches data found, skipping model training")
@@ -393,6 +419,7 @@ def retrain_models():
     log("  Loading raw pitches...")
     pitches = pd.read_parquet(pitches_path)
     log(f"  Loaded {len(pitches):,} pitches")
+    clear_mem()
 
     # Load profiles
     profiles_dir = PROJECT_ROOT / "data" / "profiles"
@@ -412,6 +439,10 @@ def retrain_models():
         batter_rolling_windows=BATTER_ROLLING_WINDOWS,
     )
     log(f"  Built {len(matchups):,} matchups with {len(matchups.columns)} columns")
+
+    # Free memory - pitches and profiles no longer needed
+    del pitches, pitcher_profiles, batter_profiles
+    clear_mem()
 
     # Filter to valid outcomes
     valid_outcomes = ["strikeout", "walk", "single", "double", "triple", "home_run", "field_out", "grounded_into_double_play", "force_out", "sac_fly", "fielders_choice_out"]
@@ -435,6 +466,10 @@ def retrain_models():
     data = data.dropna(subset=["outcome"])
 
     log(f"  Training data: {len(data):,} plate appearances")
+
+    # Free matchups - we now have filtered data
+    del matchups
+    clear_mem()
 
     # Rebuild preprocessor on enriched data
     rebuild_preprocessor(data)
@@ -471,6 +506,10 @@ def retrain_models():
     log(f"  Model saved to {output_dir}")
     log("  Model training complete")
 
+    # Final cleanup
+    del ensemble, X_train, X_val, y_train, y_val
+    clear_mem()
+
 
 def restart_streamlit_app():
     """Restart the Streamlit app to pick up new models."""
@@ -504,17 +543,18 @@ def main():
     log("Starting daily pipeline")
     log("=" * 60)
 
-    pitches_data = None
-
     try:
         if not args.skip_profiles:
-            pitches_data = update_statcast_profiles()
+            update_statcast_profiles()
+            clear_mem()
 
         if not args.skip_rolling:
-            update_rolling_stats(pitches_data)
+            update_rolling_stats()
+            clear_mem()
 
         if args.retrain:
             retrain_models()
+            clear_mem()
 
         # Restart app to pick up new models
         restart_streamlit_app()
