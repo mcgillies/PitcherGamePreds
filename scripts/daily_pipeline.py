@@ -20,8 +20,15 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import numpy as np
 import pandas as pd
 from pybaseball import statcast, cache
+
+# Import mlb_data for rich profile generation
+from mlb_data import get_pitcher_arsenal, get_batter_pitch_stats
+
+# Import config for rolling windows
+from src.config import PITCHER_ROLLING_WINDOWS, BATTER_ROLLING_WINDOWS
 
 # Enable pybaseball cache
 cache.enable()
@@ -76,167 +83,327 @@ def update_raw_data(seasons: list[int] = None):
         log(f"  Saved {len(team_batting)} team batting rows to {output_path}")
 
 
-def update_statcast_profiles(start_date: str = None, end_date: str = None):
-    """Update pitcher and batter profiles from Statcast."""
-    log("Updating Statcast profiles...")
+def update_statcast_profiles(end_date: str = None):
+    """
+    Update pitcher and batter profiles from Statcast using incremental updates.
 
-    if start_date is None:
-        # Default to current season
-        year = datetime.now().year
-        start_date = f"{year}-03-01"
+    Loads existing historical pitches, fetches only new data, appends it,
+    and rebuilds profiles from the complete dataset.
+    """
+    log("Updating Statcast profiles (incremental)...")
+
+    # Import config for DATA_START
+    from src.config import DATA_START
+
     if end_date is None:
         end_date = datetime.now().strftime("%Y-%m-%d")
 
-    log(f"  Fetching Statcast data from {start_date} to {end_date}...")
-
-    try:
-        data = statcast(start_dt=start_date, end_dt=end_date)
-        log(f"  Retrieved {len(data)} pitches")
-    except Exception as e:
-        log(f"  Error fetching Statcast data: {e}")
-        return
-
-    if data.empty:
-        log("  No Statcast data available")
-        return
-
+    raw_dir = PROJECT_ROOT / "data" / "raw"
     output_dir = PROJECT_ROOT / "data" / "profiles"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build pitcher profiles
-    log("  Building pitcher profiles...")
-    pitcher_profiles = build_pitcher_profiles(data)
-    pitcher_profiles.to_csv(output_dir / "pitcher_arsenal.csv", index=False)
-    log(f"  Saved {len(pitcher_profiles)} pitcher profiles")
+    pitches_path = raw_dir / "pitches.parquet"
 
-    # Build batter profiles
-    log("  Building batter profiles...")
-    batter_profiles = build_batter_profiles(data)
-    batter_profiles.to_csv(output_dir / "batter_profiles.csv", index=False)
-    log(f"  Saved {len(batter_profiles)} batter profiles")
+    # Load existing historical data if available
+    if pitches_path.exists():
+        log(f"  Loading existing pitches from {pitches_path}...")
+        existing_pitches = pd.read_parquet(pitches_path)
+        log(f"  Loaded {len(existing_pitches):,} existing pitches")
 
-    # Save plate appearances
+        # Find the last date in existing data
+        existing_pitches['game_date'] = pd.to_datetime(existing_pitches['game_date'])
+        last_date = existing_pitches['game_date'].max()
+        # Start fetching from the day after the last date
+        start_date = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        log(f"  Last date in existing data: {last_date.strftime('%Y-%m-%d')}")
+    else:
+        log(f"  No existing pitches found, fetching full history from {DATA_START}")
+        existing_pitches = None
+        start_date = DATA_START
+
+    # Check if we need to fetch new data
+    if start_date > end_date:
+        log(f"  Data is already up to date (last: {start_date}, today: {end_date})")
+        if existing_pitches is not None:
+            data = existing_pitches
+        else:
+            log("  No data available")
+            return None
+    else:
+        # Fetch new data
+        log(f"  Fetching new Statcast data from {start_date} to {end_date}...")
+        try:
+            new_pitches = statcast(start_dt=start_date, end_dt=end_date)
+            log(f"  Retrieved {len(new_pitches):,} new pitches")
+        except Exception as e:
+            log(f"  Error fetching Statcast data: {e}")
+            if existing_pitches is not None:
+                data = existing_pitches
+            else:
+                return None
+        else:
+            # Combine existing and new data
+            if existing_pitches is not None and not new_pitches.empty:
+                log("  Appending new pitches to existing data...")
+                data = pd.concat([existing_pitches, new_pitches], ignore_index=True)
+                # Remove any duplicates (by game_pk + at_bat_number + pitch_number)
+                if all(col in data.columns for col in ['game_pk', 'at_bat_number', 'pitch_number']):
+                    before_dedup = len(data)
+                    data = data.drop_duplicates(subset=['game_pk', 'at_bat_number', 'pitch_number'], keep='last')
+                    if before_dedup != len(data):
+                        log(f"  Removed {before_dedup - len(data)} duplicate pitches")
+                log(f"  Combined dataset: {len(data):,} total pitches")
+            elif existing_pitches is not None:
+                data = existing_pitches
+            else:
+                data = new_pitches
+
+            # Save updated pitches
+            log(f"  Saving updated pitches to {pitches_path}...")
+            data.to_parquet(pitches_path, index=False)
+            log(f"  Saved {len(data):,} pitches")
+
+    if data.empty:
+        log("  No Statcast data available")
+        return None
+
+    # Build pitcher profiles using mlb_data (rich features) from FULL dataset
+    log("  Building pitcher profiles (rich features) from full dataset...")
+    try:
+        # Convert game_date to string for mlb_data functions
+        data_for_profiles = data.copy()
+        data_for_profiles['game_date'] = pd.to_datetime(data_for_profiles['game_date']).dt.strftime('%Y-%m-%d')
+
+        pitcher_profiles = get_pitcher_arsenal(
+            DATA_START, end_date,
+            min_pitches=100,  # Higher threshold for multi-year data
+            pitches_df=data_for_profiles
+        )
+        pitcher_profiles.to_csv(output_dir / "pitcher_arsenal.csv", index=False)
+        log(f"  Saved {len(pitcher_profiles)} pitcher profiles with {len(pitcher_profiles.columns)} columns")
+    except Exception as e:
+        log(f"  Error building pitcher profiles: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # Build batter profiles using mlb_data (rich features) from FULL dataset
+    log("  Building batter profiles (rich features) from full dataset...")
+    try:
+        batter_profiles = get_batter_pitch_stats(
+            DATA_START, end_date,
+            min_pitches=100,  # Higher threshold for multi-year data
+            pitches_df=data_for_profiles
+        )
+        batter_profiles.to_csv(output_dir / "batter_profiles.csv", index=False)
+        log(f"  Saved {len(batter_profiles)} batter profiles with {len(batter_profiles.columns)} columns")
+    except Exception as e:
+        log(f"  Error building batter profiles: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # Save plate appearances for rolling stats (full dataset)
     log("  Saving plate appearances...")
     pa_data = data[data['events'].notna()].copy()
     pa_data.to_parquet(output_dir / "plate_appearances.parquet", index=False)
-    log(f"  Saved {len(pa_data)} plate appearances")
+    log(f"  Saved {len(pa_data):,} plate appearances")
+
+    return data  # Return for rolling stats computation
 
 
-def build_pitcher_profiles(data: pd.DataFrame) -> pd.DataFrame:
-    """Build pitcher arsenal profiles from Statcast data."""
-    # Group by pitcher and calculate stats
-    pitcher_stats = data.groupby(['pitcher', 'player_name']).agg({
-        'release_speed': 'mean',
-        'release_spin_rate': 'mean',
-        'pfx_x': 'mean',
-        'pfx_z': 'mean',
-        'plate_x': 'mean',
-        'plate_z': 'mean',
-        'pitch_type': 'count',
-    }).reset_index()
+def compute_pitcher_rolling_latest(pitches_df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
+    """
+    Compute latest rolling stats for pitchers using proper methodology.
 
-    pitcher_stats.columns = [
-        'pitcher_id', 'pitcher_name', 'avg_velo', 'avg_spin',
-        'avg_h_break', 'avg_v_break', 'avg_plate_x', 'avg_plate_z', 'total_pitches'
+    Returns one row per pitcher with their most recent rolling averages.
+    """
+    df = pitches_df.copy()
+
+    # Get unique pitcher-game combinations (starts)
+    starts = df.groupby(['pitcher', 'game_date']).agg(
+        pitches=('release_speed', 'count'),
+        whiffs=('description', lambda x: x.isin(['swinging_strike', 'swinging_strike_blocked']).sum()),
+        swings=('description', lambda x: x.isin([
+            'swinging_strike', 'swinging_strike_blocked',
+            'foul', 'foul_tip', 'hit_into_play'
+        ]).sum()),
+        called_strikes=('description', lambda x: (x == 'called_strike').sum()),
+        in_zone=('zone', lambda x: x.between(1, 9).sum()),
+        out_zone=('zone', lambda x: (~x.between(1, 9)).sum()),
+        strikeouts=('events', lambda x: x.isin(['strikeout', 'strikeout_double_play']).sum()),
+        walks=('events', lambda x: x.isin(['walk']).sum()),
+        pa_count=('events', lambda x: x.notna().sum()),
+        avg_velo=('release_speed', 'mean'),
+        avg_exit_velo=('launch_speed', 'mean'),
+        xwoba=('estimated_woba_using_speedangle', 'mean'),
+        batted_balls=('launch_speed', 'count'),
+        hard_hit=('launch_speed', lambda x: (x >= 95).sum()),
+    ).reset_index()
+
+    # Compute chase swings separately
+    chase_data = df[~df['zone'].between(1, 9)].groupby(['pitcher', 'game_date']).agg(
+        out_zone_swings=('description', lambda x: x.isin([
+            'swinging_strike', 'swinging_strike_blocked',
+            'foul', 'foul_tip', 'hit_into_play'
+        ]).sum()),
+    ).reset_index()
+
+    starts = starts.merge(chase_data, on=['pitcher', 'game_date'], how='left')
+    starts['out_zone_swings'] = starts['out_zone_swings'].fillna(0)
+    starts = starts.sort_values(['pitcher', 'game_date'])
+
+    # Compute rates
+    starts['whiff_rate'] = starts['whiffs'] / starts['swings'].replace(0, np.nan)
+    starts['csw_rate'] = (starts['whiffs'] + starts['called_strikes']) / starts['pitches']
+    starts['k_rate'] = starts['strikeouts'] / starts['pa_count'].replace(0, np.nan)
+    starts['bb_rate'] = starts['walks'] / starts['pa_count'].replace(0, np.nan)
+    starts['zone_rate'] = starts['in_zone'] / starts['pitches']
+    starts['chase_rate'] = starts['out_zone_swings'] / starts['out_zone'].replace(0, np.nan)
+    starts['barrel_rate'] = np.nan  # Simplified - skip barrel calc
+    starts['hard_hit_rate'] = starts['hard_hit'] / starts['batted_balls'].replace(0, np.nan)
+
+    rolling_stats = [
+        'whiff_rate', 'csw_rate', 'k_rate', 'bb_rate',
+        'zone_rate', 'chase_rate', 'avg_velo',
+        'xwoba', 'avg_exit_velo', 'barrel_rate', 'hard_hit_rate'
     ]
 
-    # Calculate whiff rate, etc.
-    whiff_data = data.groupby('pitcher').agg({
-        'description': lambda x: (x == 'swinging_strike').sum() / max((x.isin(['swinging_strike', 'foul', 'hit_into_play', 'foul_tip'])).sum(), 1),
-    }).reset_index()
-    whiff_data.columns = ['pitcher_id', 'whiff_pct']
+    # Compute rolling stats for each window
+    rolling_cols = []
+    for window in windows:
+        for stat in rolling_stats:
+            col_name = f'p_roll{window}_{stat}'
+            starts[col_name] = (
+                starts.groupby('pitcher')[stat]
+                .rolling(window=window, min_periods=1)
+                .mean()
+                .reset_index(level=0, drop=True)
+            )
+            rolling_cols.append(col_name)
 
-    pitcher_stats = pitcher_stats.merge(whiff_data, on='pitcher_id', how='left')
+    # Get the latest row per pitcher
+    latest = starts.sort_values('game_date').groupby('pitcher').tail(1)
+    output_cols = ['pitcher'] + rolling_cols
+    result = latest[output_cols].rename(columns={'pitcher': 'pitcher_id'})
 
-    return pitcher_stats
+    return result
 
 
-def build_batter_profiles(data: pd.DataFrame) -> pd.DataFrame:
-    """Build batter profiles from Statcast data."""
-    # Group by batter and calculate stats
-    batter_stats = data.groupby(['batter', 'stand']).agg({
-        'pitch_type': 'count',
-        'launch_speed': 'mean',
-        'launch_angle': 'mean',
-        'estimated_woba_using_speedangle': 'mean',
-        'estimated_ba_using_speedangle': 'mean',
-    }).reset_index()
+def compute_batter_rolling_latest(pitches_df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
+    """
+    Compute latest rolling stats for batters using proper methodology.
 
-    batter_stats.columns = [
-        'batter_id', 'stand', 'total_pitches',
-        'avg_exit_velo', 'avg_launch_angle', 'xwoba', 'xba'
+    Returns one row per batter with their most recent rolling averages.
+    """
+    df = pitches_df.copy()
+
+    # Get unique batter-game combinations
+    games = df.groupby(['batter', 'game_date']).agg(
+        pitches=('release_speed', 'count'),
+        whiffs=('description', lambda x: x.isin(['swinging_strike', 'swinging_strike_blocked']).sum()),
+        swings=('description', lambda x: x.isin([
+            'swinging_strike', 'swinging_strike_blocked',
+            'foul', 'foul_tip', 'hit_into_play'
+        ]).sum()),
+        in_zone=('zone', lambda x: x.between(1, 9).sum()),
+        out_zone=('zone', lambda x: (~x.between(1, 9)).sum()),
+        strikeouts=('events', lambda x: x.isin(['strikeout', 'strikeout_double_play']).sum()),
+        walks=('events', lambda x: x.isin(['walk']).sum()),
+        pa_count=('events', lambda x: x.notna().sum()),
+        avg_exit_velo=('launch_speed', 'mean'),
+        xwoba=('estimated_woba_using_speedangle', 'mean'),
+        batted_balls=('launch_speed', 'count'),
+        hard_hit=('launch_speed', lambda x: (x >= 95).sum()),
+    ).reset_index()
+
+    # Compute zone/chase swings
+    zone_swing_data = df[df['zone'].between(1, 9)].groupby(['batter', 'game_date']).agg(
+        zone_swings=('description', lambda x: x.isin([
+            'swinging_strike', 'swinging_strike_blocked',
+            'foul', 'foul_tip', 'hit_into_play'
+        ]).sum()),
+    ).reset_index()
+
+    chase_data = df[~df['zone'].between(1, 9)].groupby(['batter', 'game_date']).agg(
+        chase_swings=('description', lambda x: x.isin([
+            'swinging_strike', 'swinging_strike_blocked',
+            'foul', 'foul_tip', 'hit_into_play'
+        ]).sum()),
+    ).reset_index()
+
+    games = games.merge(zone_swing_data, on=['batter', 'game_date'], how='left')
+    games = games.merge(chase_data, on=['batter', 'game_date'], how='left')
+    games['zone_swings'] = games['zone_swings'].fillna(0)
+    games['chase_swings'] = games['chase_swings'].fillna(0)
+    games = games.sort_values(['batter', 'game_date'])
+
+    # Compute rates
+    games['whiff_rate'] = games['whiffs'] / games['swings'].replace(0, np.nan)
+    games['contact_rate'] = 1 - games['whiff_rate']
+    games['k_rate'] = games['strikeouts'] / games['pa_count'].replace(0, np.nan)
+    games['bb_rate'] = games['walks'] / games['pa_count'].replace(0, np.nan)
+    games['zone_swing_rate'] = games['zone_swings'] / games['in_zone'].replace(0, np.nan)
+    games['chase_rate'] = games['chase_swings'] / games['out_zone'].replace(0, np.nan)
+    games['barrel_rate'] = np.nan  # Simplified
+    games['hard_hit_rate'] = games['hard_hit'] / games['batted_balls'].replace(0, np.nan)
+
+    rolling_stats = [
+        'whiff_rate', 'contact_rate', 'k_rate', 'bb_rate',
+        'zone_swing_rate', 'chase_rate',
+        'xwoba', 'avg_exit_velo', 'barrel_rate', 'hard_hit_rate'
     ]
 
-    return batter_stats
+    # Compute rolling stats for each window
+    rolling_cols = []
+    for window in windows:
+        for stat in rolling_stats:
+            col_name = f'b_roll{window}_{stat}'
+            games[col_name] = (
+                games.groupby('batter')[stat]
+                .rolling(window=window, min_periods=1)
+                .mean()
+                .reset_index(level=0, drop=True)
+            )
+            rolling_cols.append(col_name)
+
+    # Get the latest row per batter
+    latest = games.sort_values('game_date').groupby('batter').tail(1)
+    output_cols = ['batter'] + rolling_cols
+    result = latest[output_cols].rename(columns={'batter': 'batter_id'})
+
+    return result
 
 
-def update_rolling_stats():
-    """Update rolling stats for pitchers and batters."""
+def update_rolling_stats(pitches_df: pd.DataFrame = None):
+    """Update rolling stats for pitchers and batters using proper methodology."""
     log("Updating rolling stats...")
 
     profiles_dir = PROJECT_ROOT / "data" / "profiles"
 
-    # Load plate appearances
-    pa_path = profiles_dir / "plate_appearances.parquet"
-    if not pa_path.exists():
-        log("  No plate appearances data found, skipping rolling stats")
-        return
+    # Load pitches data if not provided
+    if pitches_df is None:
+        pa_path = profiles_dir / "plate_appearances.parquet"
+        if not pa_path.exists():
+            log("  No plate appearances data found, skipping rolling stats")
+            return
 
-    pa = pd.read_parquet(pa_path)
-    log(f"  Loaded {len(pa)} plate appearances")
+        pitches_df = pd.read_parquet(pa_path)
+        log(f"  Loaded {len(pitches_df)} plate appearances")
+    else:
+        log(f"  Using provided pitch data: {len(pitches_df)} pitches")
 
-    # Calculate pitcher rolling stats
-    log("  Calculating pitcher rolling stats...")
-    pitcher_rolling = calculate_pitcher_rolling(pa)
+    # Calculate pitcher rolling stats with proper windows
+    log(f"  Calculating pitcher rolling stats (windows: {PITCHER_ROLLING_WINDOWS})...")
+    pitcher_rolling = compute_pitcher_rolling_latest(pitches_df, PITCHER_ROLLING_WINDOWS)
     pitcher_rolling.to_csv(profiles_dir / "pitcher_rolling.csv", index=False)
-    log(f"  Saved {len(pitcher_rolling)} pitcher rolling stats")
+    log(f"  Saved {len(pitcher_rolling)} pitcher rolling stats with {len(pitcher_rolling.columns)} columns")
 
-    # Calculate batter rolling stats
-    log("  Calculating batter rolling stats...")
-    batter_rolling = calculate_batter_rolling(pa)
+    # Calculate batter rolling stats with proper windows
+    log(f"  Calculating batter rolling stats (windows: {BATTER_ROLLING_WINDOWS})...")
+    batter_rolling = compute_batter_rolling_latest(pitches_df, BATTER_ROLLING_WINDOWS)
     batter_rolling.to_csv(profiles_dir / "batter_rolling.csv", index=False)
-    log(f"  Saved {len(batter_rolling)} batter rolling stats")
+    log(f"  Saved {len(batter_rolling)} batter rolling stats with {len(batter_rolling.columns)} columns")
 
 
-def calculate_pitcher_rolling(pa: pd.DataFrame, window: int = 100) -> pd.DataFrame:
-    """Calculate rolling stats for pitchers over last N plate appearances."""
-    # Sort by game date
-    pa = pa.sort_values('game_date')
-
-    rolling_stats = []
-    for pitcher_id, group in pa.groupby('pitcher'):
-        recent = group.tail(window)
-
-        stats = {
-            'pitcher_id': pitcher_id,
-            'rolling_pa': len(recent),
-            'rolling_k_pct': (recent['events'] == 'strikeout').mean() if len(recent) > 0 else 0,
-            'rolling_bb_pct': (recent['events'] == 'walk').mean() if len(recent) > 0 else 0,
-            'rolling_hr_pct': (recent['events'] == 'home_run').mean() if len(recent) > 0 else 0,
-        }
-        rolling_stats.append(stats)
-
-    return pd.DataFrame(rolling_stats)
-
-
-def calculate_batter_rolling(pa: pd.DataFrame, window: int = 100) -> pd.DataFrame:
-    """Calculate rolling stats for batters over last N plate appearances."""
-    pa = pa.sort_values('game_date')
-
-    rolling_stats = []
-    for batter_id, group in pa.groupby('batter'):
-        recent = group.tail(window)
-
-        stats = {
-            'batter_id': batter_id,
-            'rolling_pa': len(recent),
-            'rolling_k_pct': (recent['events'] == 'strikeout').mean() if len(recent) > 0 else 0,
-            'rolling_bb_pct': (recent['events'] == 'walk').mean() if len(recent) > 0 else 0,
-            'rolling_hr_pct': (recent['events'] == 'home_run').mean() if len(recent) > 0 else 0,
-        }
-        rolling_stats.append(stats)
-
-    return pd.DataFrame(rolling_stats)
 
 
 def rebuild_preprocessor(data: pd.DataFrame) -> None:
@@ -259,19 +426,40 @@ def retrain_models():
 
     from sklearn.model_selection import train_test_split
     from src.model.train_binary_models import BinaryModelEnsemble, prepare_features
+    from src.data.preprocess import MatchupPreprocessor
 
-    # Load training data
-    data_path = PROJECT_ROOT / "data" / "profiles" / "plate_appearances.parquet"
-    if not data_path.exists():
-        log("  No training data found, skipping model training")
+    # Load raw pitches
+    pitches_path = PROJECT_ROOT / "data" / "raw" / "pitches.parquet"
+    if not pitches_path.exists():
+        log("  No pitches data found, skipping model training")
         return
 
-    log("  Loading training data...")
-    data = pd.read_parquet(data_path)
+    log("  Loading raw pitches...")
+    pitches = pd.read_parquet(pitches_path)
+    log(f"  Loaded {len(pitches):,} pitches")
+
+    # Load profiles
+    profiles_dir = PROJECT_ROOT / "data" / "profiles"
+    log("  Loading profiles...")
+    pitcher_profiles = pd.read_csv(profiles_dir / "pitcher_arsenal.csv")
+    batter_profiles = pd.read_csv(profiles_dir / "batter_profiles.csv")
+    log(f"  Pitcher profiles: {len(pitcher_profiles)}, Batter profiles: {len(batter_profiles)}")
+
+    # Build enriched matchup data using preprocessor
+    log("  Building matchup data (this may take a while)...")
+    preprocessor = MatchupPreprocessor()
+    matchups = preprocessor.build_matchup_data(
+        pitches_df=pitches,
+        pitcher_profiles=pitcher_profiles,
+        batter_profiles=batter_profiles,
+        pitcher_rolling_windows=PITCHER_ROLLING_WINDOWS,
+        batter_rolling_windows=BATTER_ROLLING_WINDOWS,
+    )
+    log(f"  Built {len(matchups):,} matchups with {len(matchups.columns)} columns")
 
     # Filter to valid outcomes
     valid_outcomes = ["strikeout", "walk", "single", "double", "triple", "home_run", "field_out", "grounded_into_double_play", "force_out", "sac_fly", "fielders_choice_out"]
-    data = data[data['events'].isin(valid_outcomes)].copy()
+    data = matchups[matchups['events'].isin(valid_outcomes)].copy()
 
     # Map events to outcome classes
     event_to_outcome = {
@@ -290,9 +478,9 @@ def retrain_models():
     data["outcome"] = data["events"].map(event_to_outcome)
     data = data.dropna(subset=["outcome"])
 
-    log(f"  Training data: {len(data)} plate appearances")
+    log(f"  Training data: {len(data):,} plate appearances")
 
-    # Rebuild preprocessor first
+    # Rebuild preprocessor on enriched data
     rebuild_preprocessor(data)
 
     # Prepare features with new preprocessor
@@ -312,11 +500,13 @@ def retrain_models():
 
     # Train ensemble
     log("  Training binary ensemble (this may take a while)...")
+    output_dir = PROJECT_ROOT / "models" / "binary_ensemble"
     ensemble = BinaryModelEnsemble()
     ensemble.fit(
         X_train, y_train,
         X_val, y_val,
-        time_budget=300,  # 5 min per model
+        verbose=1,
+        save_dir=output_dir,
     )
 
     # Save model
@@ -362,15 +552,17 @@ def main():
 
     seasons = args.seasons or [datetime.now().year]
 
+    pitches_data = None
+
     try:
         if not args.skip_raw:
             update_raw_data(seasons)
 
         if not args.skip_profiles:
-            update_statcast_profiles()
+            pitches_data = update_statcast_profiles()
 
         if not args.skip_rolling:
-            update_rolling_stats()
+            update_rolling_stats(pitches_data)
 
         if args.retrain:
             retrain_models()
