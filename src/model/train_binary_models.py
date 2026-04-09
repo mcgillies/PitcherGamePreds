@@ -87,7 +87,7 @@ class BinaryModelEnsemble:
         seed: int = 42,
         min_num_leaves: int = 16,
         feature_selection: bool = True,
-        feature_selection_threshold: float = 0.01,
+        feature_selection_threshold: float = 0.2,
     ):
         """
         Initialize ensemble.
