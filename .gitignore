@@ -171,3 +171,5 @@ data/
 
 # Pipeline logs
 logs/
+
+reports/
