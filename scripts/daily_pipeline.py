@@ -406,7 +406,6 @@ def retrain_models():
     """Retrain the binary ensemble models (including preprocessor)."""
     log("Retraining models...")
 
-    from sklearn.model_selection import train_test_split
     from src.model.train_binary_models import BinaryModelEnsemble, prepare_features
     from src.data.preprocess import MatchupPreprocessor
 
@@ -485,17 +484,20 @@ def retrain_models():
         log(f"  Error preparing features: {e}")
         return
 
-    # Train/val split
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.02, random_state=42)
-    log(f"  Train: {len(X_train)}, Val: {len(X_val)}")
+    del data
+    clear_mem()
+
+    # Train on ALL data (no val split for production)
+    log(f"  Training on {len(X):,} samples (all data)")
 
     # Train ensemble
     log("  Training binary ensemble (this may take a while)...")
     output_dir = PROJECT_ROOT / "models" / "binary_ensemble"
     ensemble = BinaryModelEnsemble()
     ensemble.fit(
-        X_train, y_train,
-        X_val, y_val,
+        X, y,
+        X_val=None,
+        y_val=None,
         verbose=1,
         save_dir=output_dir,
     )
@@ -507,7 +509,7 @@ def retrain_models():
     log("  Model training complete")
 
     # Final cleanup
-    del ensemble, X_train, X_val, y_train, y_val
+    del ensemble, X, y
     clear_mem()
 
 
