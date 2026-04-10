@@ -486,7 +486,7 @@ def retrain_models():
         return
 
     # Train/val split
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.15, random_state=42)
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.02, random_state=42)
     log(f"  Train: {len(X_train)}, Val: {len(X_val)}")
 
     # Train ensemble
