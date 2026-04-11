@@ -24,6 +24,14 @@ TEST_DATE = "2025-07-15"
 PITCHER_ROLLING_WINDOWS = [5, 10, 20]    # By starts
 BATTER_ROLLING_WINDOWS = [25, 50, 100]   # By games
 
+# Exponential decay half-lives for profile features (in days)
+# Shorter half-life = more recent data weighted more heavily
+PITCHER_ARSENAL_HALF_LIFE = 365    # Velo/spin/movement (stable)
+PITCHER_USAGE_HALF_LIFE = 180      # Pitch usage percentages
+PITCHER_PERF_HALF_LIFE = 90        # Whiff%, zone%, etc.
+BATTER_PERF_HALF_LIFE = 90         # Whiff%, chase%, etc.
+BATTER_BATTED_BALL_HALF_LIFE = 120 # Exit velo, xwOBA, etc.
+
 # Output directories
 DATA_DIR = "data"
 MODELS_DIR = "models"
