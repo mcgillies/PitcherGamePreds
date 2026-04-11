@@ -124,6 +124,7 @@ class BinaryModelEnsemble:
         verbose: int = 1,
         save_dir: str | Path | None = None,
         memory_efficient: bool = True,
+        retrain_full: bool = False,
     ) -> "BinaryModelEnsemble":
         """
         Train binary classifiers for each outcome.
@@ -136,6 +137,8 @@ class BinaryModelEnsemble:
             verbose: Verbosity level
             save_dir: Directory to save models (required if memory_efficient=True)
             memory_efficient: If True, save each model to disk and clear from memory
+            retrain_full: If True and no val data, retrain final model on all data
+                         after finding hyperparameters (ensures full tree training)
 
         Returns:
             Self for chaining
@@ -194,32 +197,78 @@ class BinaryModelEnsemble:
                 "seed": self.seed,
                 "verbose": max(0, verbose - 1),
                 "ensemble": False,
-                "early_stop": True,
                 "n_jobs": 1,  # Single thread to reduce memory
                 "free_mem_ratio": 0.1,  # Be more aggressive freeing memory
             }
 
-            # Set minimum leaves
-            if self.min_num_leaves > 4:
-                from flaml import tune
-                automl_settings["custom_hp"] = {
-                    "lgbm": {
-                        "num_leaves": {
-                            "domain": tune.randint(self.min_num_leaves, 256),
-                        },
+            # Set minimum leaves AND minimum trees to prevent underfitting
+            from flaml import tune
+            automl_settings["custom_hp"] = {
+                "lgbm": {
+                    "num_leaves": {
+                        "domain": tune.randint(max(self.min_num_leaves, 16), 256),
                     },
-                    "xgboost": {
-                        "max_leaves": {
-                            "domain": tune.randint(self.min_num_leaves, 256),
-                        },
+                    "n_estimators": {
+                        "domain": tune.randint(100, 1000),  # Force at least 100 trees
                     },
-                }
+                },
+                "xgboost": {
+                    "max_leaves": {
+                        "domain": tune.randint(max(self.min_num_leaves, 16), 256),
+                    },
+                    "n_estimators": {
+                        "domain": tune.randint(100, 1000),
+                    },
+                },
+            }
 
             if X_val_model is not None and y_val_binary is not None:
                 automl_settings["X_val"] = X_val_model
                 automl_settings["y_val"] = y_val_binary
 
             automl.fit(X_train_model, y_binary, **automl_settings)
+
+            # If retrain_full and no val data, retrain on all data with found hyperparameters
+            final_model = None
+            if retrain_full and X_val is None:
+                best_config = automl.best_config
+                best_estimator = automl.best_estimator
+                print(f"  Retraining {best_estimator} on all data with best config...")
+
+                if best_estimator == 'lgbm':
+                    from lightgbm import LGBMClassifier
+                    lgbm_params = {
+                        'n_estimators': best_config.get('n_estimators', 100),
+                        'num_leaves': best_config.get('num_leaves', 31),
+                        'min_child_samples': best_config.get('min_child_samples', 20),
+                        'learning_rate': best_config.get('learning_rate', 0.1),
+                        'colsample_bytree': best_config.get('colsample_bytree', 1.0),
+                        'reg_alpha': best_config.get('reg_alpha', 0.0),
+                        'reg_lambda': best_config.get('reg_lambda', 0.0),
+                        'random_state': self.seed,
+                        'verbose': -1,
+                    }
+                    if 'log_max_bin' in best_config:
+                        lgbm_params['max_bin'] = 2 ** best_config['log_max_bin']
+                    final_model = LGBMClassifier(**lgbm_params)
+                    final_model.fit(X_train_model, y_binary)
+                    print(f"  Retrained: n_estimators={final_model.n_estimators}, n_iter_={final_model.n_iter_}")
+
+                elif best_estimator == 'xgboost':
+                    from xgboost import XGBClassifier
+                    xgb_params = {
+                        'n_estimators': best_config.get('n_estimators', 100),
+                        'max_leaves': best_config.get('max_leaves', 31),
+                        'learning_rate': best_config.get('learning_rate', 0.1),
+                        'colsample_bytree': best_config.get('colsample_bytree', 1.0),
+                        'reg_alpha': best_config.get('reg_alpha', 0.0),
+                        'reg_lambda': best_config.get('reg_lambda', 0.0),
+                        'random_state': self.seed,
+                        'verbosity': 0,
+                    }
+                    final_model = XGBClassifier(**xgb_params)
+                    final_model.fit(X_train_model, y_binary)
+                    print(f"  Retrained: n_estimators={final_model.n_estimators}")
 
             print(f"  Best model: {automl.best_estimator}")
             print(f"  Best {self.metric}: {automl.best_loss:.4f}")
@@ -233,18 +282,22 @@ class BinaryModelEnsemble:
                 print(f"  Val AUC: {metrics['auc']:.3f}, Brier: {metrics['brier']:.4f}")
 
             # Save and optionally clear from memory
+            # If we retrained, save the final_model; otherwise save automl
+            model_to_save = final_model if final_model is not None else automl
             if save_dir is not None:
                 model_path = save_dir / f"model_{outcome}.pkl"
                 with open(model_path, 'wb') as f:
-                    pickle.dump(automl, f)
+                    pickle.dump(model_to_save, f)
                 print(f"  Saved to {model_path}")
 
             if memory_efficient:
                 # Don't keep model in memory
                 del automl
+                if final_model is not None:
+                    del final_model
                 gc.collect()
             else:
-                self.models[outcome] = automl
+                self.models[outcome] = model_to_save
 
             print()
 
