@@ -195,7 +195,8 @@ class BinaryModelEnsemble:
                 "verbose": max(0, verbose - 1),
                 "ensemble": False,
                 "early_stop": True,
-                "n_jobs": -1,
+                "n_jobs": 1,  # Single thread to reduce memory
+                "free_mem_ratio": 0.1,  # Be more aggressive freeing memory
             }
 
             # Set minimum leaves
@@ -298,20 +299,26 @@ class BinaryModelEnsemble:
         Returns:
             List of selected feature names
         """
+        import gc
         from lightgbm import LGBMClassifier
 
-        # Quick model for feature selection
+        # Quick model for feature selection - memory optimized settings
         model = LGBMClassifier(
-            n_estimators=100,
-            num_leaves=31,
+            n_estimators=50,
+            num_leaves=16,
             learning_rate=0.1,
             random_state=self.seed,
             verbose=-1,
+            force_col_wise=True,  # More memory efficient for wide data
         )
         model.fit(X, y)
 
         # Get feature importances
-        importances = model.feature_importances_
+        importances = model.feature_importances_.copy()
+
+        # Clean up model immediately
+        del model
+        gc.collect()
 
         # Select features above threshold (relative importance)
         threshold = self.feature_selection_threshold * importances.max()
