@@ -167,7 +167,10 @@ bet365-scraper/
 .env
 
 # Data files (too large for git)
-data/
+data/raw/
+data/processed/
+# Keep profiles for deployment
+!data/profiles/
 
 # Pipeline logs
 logs/
