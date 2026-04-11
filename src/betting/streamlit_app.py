@@ -25,9 +25,24 @@ st.set_page_config(
 )
 
 
+def get_model_version():
+    """Get model version based on file modification times."""
+    model_dir = Path("models/binary_ensemble")
+    if not model_dir.exists():
+        return "0"
+
+    mod_times = []
+    for pkl_file in model_dir.glob("*.pkl"):
+        mod_times.append(pkl_file.stat().st_mtime)
+
+    if mod_times:
+        return str(max(mod_times))
+    return "0"
+
+
 @st.cache_resource
-def get_predictor():
-    """Load predictor (cached)."""
+def get_predictor(_model_version: str):
+    """Load predictor (cached, invalidated when models update)."""
     return GamePredictorBinary(
         ensemble_dir="models/binary_ensemble",
         preprocessor_path="models/matchup_preprocessor.pkl",
@@ -102,7 +117,8 @@ def render_today():
 
     # Load predictions
     with st.spinner("Loading predictions..."):
-        predictor = get_predictor()
+        model_version = get_model_version()
+        predictor = get_predictor(model_version)
         predictions = predictor.predict_day(date.today().isoformat())
 
     # Try to load odds
