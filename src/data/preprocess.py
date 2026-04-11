@@ -89,27 +89,33 @@ class MatchupPreprocessor:
         Returns:
             DataFrame with one row per plate appearance
         """
+        import gc
+
         print("Building matchup training data...")
 
         # Step 1: Extract plate appearances (no at-bat aggregation - use pitcher profile instead)
         print("  Extracting plate appearances...")
         pa_features = self._extract_plate_appearances(pitches_df)
+        gc.collect()
 
         # Step 2: Compute rolling stats for pitchers (by starts)
         print("  Computing pitcher rolling stats...")
         pitcher_rolling = self._compute_pitcher_rolling(
             pitches_df, pitcher_rolling_windows
         )
+        gc.collect()
 
         # Step 3: Compute rolling stats for batters (by games)
         print("  Computing batter rolling stats...")
         batter_rolling = self._compute_batter_rolling(
             pitches_df, batter_rolling_windows
         )
+        gc.collect()
 
         # Step 4: Merge everything together
         print("  Merging features...")
-        matchups = pa_features.copy()
+        # Work with pa_features directly - no need to copy
+        matchups = pa_features
 
         # Extract season from game_date for profile matching
         matchups['season'] = pd.to_datetime(matchups['game_date']).dt.year
@@ -184,10 +190,8 @@ class MatchupPreprocessor:
 
         Pitch characteristics come from pitcher profiles instead of per-AB aggregation.
         """
-        df = pitches_df.copy()
-
-        # Filter to valid data
-        df = df[df['pitcher'].notna() & df['batter'].notna()]
+        # Filter to valid data without copy
+        df = pitches_df[pitches_df['pitcher'].notna() & pitches_df['batter'].notna()]
 
         # Group by plate appearance - just get the outcome and handedness
         pa_groups = df.groupby(['game_pk', 'game_date', 'at_bat_number', 'pitcher', 'batter'])
@@ -226,7 +230,8 @@ class MatchupPreprocessor:
         Includes: whiff%, csw%, K%, BB%, zone%, chase%, avg_velo,
                   xwOBA against, avg_exit_velo against, barrel% against
         """
-        df = pitches_df.copy()
+        # Work with original data - groupby creates new dataframes
+        df = pitches_df
 
         # Get unique pitcher-game combinations (starts)
         starts = df.groupby(['pitcher', 'game_date']).agg(
@@ -320,16 +325,13 @@ class MatchupPreprocessor:
         """
         Compute rolling stats for batters by number of games.
 
-        Includes: whiff%, contact%, K%, BB%, chase%, zone_swing%,
-                  xwOBA, avg_exit_velo, barrel%, hard_hit%
+        Includes: whiff%, contact%, K%, BB%, zone_swing%, chase%,
+                  xwOBA, avg_exit_velo, hard_hit%
         """
-        df = pitches_df.copy()
+        df = pitches_df
 
         # Get unique batter-game combinations
         games = df.groupby(['batter', 'game_date']).agg(
-            # Pitch counts
-            pitches=('release_speed', 'count'),
-
             # Swing/whiff data
             whiffs=('description', lambda x: x.isin(['swinging_strike', 'swinging_strike_blocked']).sum()),
             swings=('description', lambda x: x.isin([
@@ -337,7 +339,7 @@ class MatchupPreprocessor:
                 'foul', 'foul_tip', 'hit_into_play'
             ]).sum()),
 
-            # Zone discipline
+            # Zone data
             in_zone=('zone', lambda x: x.between(1, 9).sum()),
             out_zone=('zone', lambda x: (~x.between(1, 9)).sum()),
 
@@ -351,27 +353,34 @@ class MatchupPreprocessor:
             xwoba=('estimated_woba_using_speedangle', 'mean'),
             batted_balls=('launch_speed', 'count'),
             hard_hit=('launch_speed', lambda x: (x >= 95).sum()),
-            barrels=('launch_speed', lambda x: ((x >= 98) & (df.loc[x.index, 'launch_angle'].between(26, 30))).sum() if len(x) > 0 else 0),
         ).reset_index()
 
-        # Compute zone swings separately
-        zone_swing_data = df[df['zone'].between(1, 9)].groupby(['batter', 'game_date']).agg(
-            zone_swings=('description', lambda x: x.isin([
-                'swinging_strike', 'swinging_strike_blocked',
-                'foul', 'foul_tip', 'hit_into_play'
-            ]).sum()),
-        ).reset_index()
+        # Compute barrels separately (requires both launch_speed and launch_angle)
+        barrel_data = df[
+            (df['launch_speed'] >= 98) &
+            (df['launch_angle'].between(26, 30))
+        ].groupby(['batter', 'game_date']).size().reset_index(name='barrels')
+        games = games.merge(barrel_data, on=['batter', 'game_date'], how='left')
+        games['barrels'] = games['barrels'].fillna(0)
 
+        # Compute chase swings separately (swings on pitches outside zone)
         chase_data = df[~df['zone'].between(1, 9)].groupby(['batter', 'game_date']).agg(
-            chase_swings=('description', lambda x: x.isin([
+            out_zone_swings=('description', lambda x: x.isin([
                 'swinging_strike', 'swinging_strike_blocked',
                 'foul', 'foul_tip', 'hit_into_play'
             ]).sum()),
         ).reset_index()
 
-        games = games.merge(zone_swing_data, on=['batter', 'game_date'], how='left')
-        games = games.merge(chase_data, on=['batter', 'game_date'], how='left')
+        # Zone swings
+        zone_data = df[df['zone'].between(1, 9)].groupby(['batter', 'game_date']).agg(
+            in_zone_swings=('description', lambda x: x.isin([
+                'swinging_strike', 'swinging_strike_blocked',
+                'foul', 'foul_tip', 'hit_into_play'
+            ]).sum()),
+        ).reset_index()
 
+        games = games.merge(chase_data, on=['batter', 'game_date'], how='left')
+        games = games.merge(zone_data, on=['batter', 'game_date'], how='left')
         games = games.sort_values(['batter', 'game_date'])
 
         # Compute rates
@@ -379,16 +388,16 @@ class MatchupPreprocessor:
         games['contact_rate'] = 1 - games['whiff_rate']
         games['k_rate'] = games['strikeouts'] / games['pa_count'].replace(0, np.nan)
         games['bb_rate'] = games['walks'] / games['pa_count'].replace(0, np.nan)
-        games['zone_swing_rate'] = games['zone_swings'] / games['in_zone'].replace(0, np.nan)
-        games['chase_rate'] = games['chase_swings'] / games['out_zone'].replace(0, np.nan)
-        games['barrel_rate'] = games['barrels'] / games['batted_balls'].replace(0, np.nan)
+        games['zone_swing_rate'] = games['in_zone_swings'] / games['in_zone'].replace(0, np.nan)
+        games['chase_rate'] = games['out_zone_swings'] / games['out_zone'].replace(0, np.nan)
         games['hard_hit_rate'] = games['hard_hit'] / games['batted_balls'].replace(0, np.nan)
+        games['barrel_rate'] = games['barrels'] / games['batted_balls'].replace(0, np.nan)
 
         # Stats to compute rolling for
         rolling_stats = [
             'whiff_rate', 'contact_rate', 'k_rate', 'bb_rate',
             'zone_swing_rate', 'chase_rate',
-            'xwoba', 'avg_exit_velo', 'barrel_rate', 'hard_hit_rate'
+            'xwoba', 'avg_exit_velo', 'hard_hit_rate', 'barrel_rate'
         ]
 
         # Compute rolling stats for each window
@@ -413,34 +422,32 @@ class MatchupPreprocessor:
 
     def _add_handedness_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Add handedness encoding features.
+        Add handedness encoding features (modifies df in place to save memory).
         """
-        result = df.copy()
-
         # Get handedness from columns (may be from different sources)
-        if 'p_throws' not in result.columns and 'p_p_throws' in result.columns:
-            result['p_throws'] = result['p_p_throws']
-        if 'stand' not in result.columns and 'b_stand' in result.columns:
-            result['stand'] = result['b_stand']
+        if 'p_throws' not in df.columns and 'p_p_throws' in df.columns:
+            df['p_throws'] = df['p_p_throws']
+        if 'stand' not in df.columns and 'b_stand' in df.columns:
+            df['stand'] = df['b_stand']
 
-        # Encode pitcher hand as binary
-        result['p_throws_L'] = (result['p_throws'] == 'L').astype(int)
-        result['p_throws_R'] = (result['p_throws'] == 'R').astype(int)
+        # Encode pitcher hand as binary (use int8 to save memory)
+        df['p_throws_L'] = (df['p_throws'] == 'L').astype('int8')
+        df['p_throws_R'] = (df['p_throws'] == 'R').astype('int8')
 
         # Encode batter stance as binary
-        result['stand_L'] = (result['stand'] == 'L').astype(int)
-        result['stand_R'] = (result['stand'] == 'R').astype(int)
+        df['stand_L'] = (df['stand'] == 'L').astype('int8')
+        df['stand_R'] = (df['stand'] == 'R').astype('int8')
 
         # Platoon matchup encoding (all 4 combinations)
-        result['matchup_LvL'] = ((result['p_throws'] == 'L') & (result['stand'] == 'L')).astype(int)
-        result['matchup_LvR'] = ((result['p_throws'] == 'L') & (result['stand'] == 'R')).astype(int)
-        result['matchup_RvL'] = ((result['p_throws'] == 'R') & (result['stand'] == 'L')).astype(int)
-        result['matchup_RvR'] = ((result['p_throws'] == 'R') & (result['stand'] == 'R')).astype(int)
+        df['matchup_LvL'] = ((df['p_throws'] == 'L') & (df['stand'] == 'L')).astype('int8')
+        df['matchup_LvR'] = ((df['p_throws'] == 'L') & (df['stand'] == 'R')).astype('int8')
+        df['matchup_RvL'] = ((df['p_throws'] == 'R') & (df['stand'] == 'L')).astype('int8')
+        df['matchup_RvR'] = ((df['p_throws'] == 'R') & (df['stand'] == 'R')).astype('int8')
 
         # Same hand indicator
-        result['same_hand'] = (result['p_throws'] == result['stand']).astype(int)
+        df['same_hand'] = (df['p_throws'] == df['stand']).astype('int8')
 
-        return result
+        return df
 
     def get_feature_columns(self, df: pd.DataFrame) -> tuple[list, list]:
         """
