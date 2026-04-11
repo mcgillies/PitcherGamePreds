@@ -415,9 +415,26 @@ def retrain_models():
         log("  No pitches data found, skipping model training")
         return
 
-    log("  Loading raw pitches...")
-    pitches = pd.read_parquet(pitches_path)
+    # Only load columns we actually need to reduce memory
+    needed_columns = [
+        'game_pk', 'game_date', 'at_bat_number', 'pitcher', 'batter',
+        'p_throws', 'stand', 'events', 'description', 'zone',
+        'release_speed', 'launch_speed', 'launch_angle',
+        'estimated_woba_using_speedangle',
+    ]
+
+    log("  Loading raw pitches (selected columns only)...")
+    pitches = pd.read_parquet(pitches_path, columns=needed_columns)
     log(f"  Loaded {len(pitches):,} pitches")
+
+    # Convert to memory-efficient dtypes
+    pitches['game_pk'] = pitches['game_pk'].astype('int32')
+    pitches['at_bat_number'] = pitches['at_bat_number'].astype('int16')
+    pitches['pitcher'] = pitches['pitcher'].astype('int32')
+    pitches['batter'] = pitches['batter'].astype('int32')
+    for col in ['release_speed', 'launch_speed', 'launch_angle', 'estimated_woba_using_speedangle']:
+        if col in pitches.columns:
+            pitches[col] = pitches[col].astype('float32')
     clear_mem()
 
     # Load profiles
@@ -487,24 +504,34 @@ def retrain_models():
     del data
     clear_mem()
 
+    # Convert to float32 to reduce memory (models work fine with float32)
+    log("  Converting features to float32 to reduce memory...")
+    X = X.astype(np.float32)
+    clear_mem()
+
     # Train on ALL data (no val split for production)
     log(f"  Training on {len(X):,} samples (all data)")
 
-    # Train ensemble
-    log("  Training binary ensemble (this may take a while)...")
+    # Train ensemble with memory-efficient mode
+    log("  Training binary ensemble (memory-efficient mode)...")
     output_dir = PROJECT_ROOT / "models" / "binary_ensemble"
-    ensemble = BinaryModelEnsemble()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    ensemble = BinaryModelEnsemble(
+        time_budget_per_model=150,  # 2.5 mins per model
+        feature_selection=True,
+        feature_selection_threshold=0.2,
+        min_num_leaves=32,
+        estimator_list=['lgbm', 'xgboost'],  # Exclude catboost - causes calibration issues
+    )
     ensemble.fit(
         X, y,
         X_val=None,
         y_val=None,
         verbose=1,
         save_dir=output_dir,
+        memory_efficient=True,  # Save models to disk, don't keep in memory
     )
-
-    # Save model
-    output_dir = PROJECT_ROOT / "models" / "binary_ensemble"
-    ensemble.save(output_dir)
     log(f"  Model saved to {output_dir}")
     log("  Model training complete")
 
