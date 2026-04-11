@@ -30,8 +30,12 @@ from pybaseball import statcast, cache
 # Import mlb_data for rich profile generation
 from mlb_data import get_pitcher_arsenal, get_batter_pitch_stats
 
-# Import config for rolling windows
-from src.config import PITCHER_ROLLING_WINDOWS, BATTER_ROLLING_WINDOWS
+# Import config for rolling windows and decay half-lives
+from src.config import (
+    PITCHER_ROLLING_WINDOWS, BATTER_ROLLING_WINDOWS,
+    PITCHER_ARSENAL_HALF_LIFE, PITCHER_USAGE_HALF_LIFE, PITCHER_PERF_HALF_LIFE,
+    BATTER_PERF_HALF_LIFE, BATTER_BATTED_BALL_HALF_LIFE,
+)
 
 # Enable pybaseball cache
 cache.enable()
@@ -143,12 +147,17 @@ def update_statcast_profiles(end_date: str = None):
     clear_mem()
 
     # Build pitcher profiles using mlb_data (rich features) from FULL dataset
-    log("  Building pitcher profiles (rich features) from full dataset...")
+    # Uses exponential decay weighting for recency bias
+    log("  Building pitcher profiles (with exponential decay weighting)...")
     try:
         pitcher_profiles = get_pitcher_arsenal(
             DATA_START, end_date,
-            min_pitches=100,  # Higher threshold for multi-year data
-            pitches_df=data
+            min_pitches=100,
+            pitches_df=data,
+            use_decay=True,
+            arsenal_half_life=PITCHER_ARSENAL_HALF_LIFE,
+            usage_half_life=PITCHER_USAGE_HALF_LIFE,
+            performance_half_life=PITCHER_PERF_HALF_LIFE,
         )
         pitcher_profiles.to_csv(output_dir / "pitcher_arsenal.csv", index=False)
         log(f"  Saved {len(pitcher_profiles)} pitcher profiles with {len(pitcher_profiles.columns)} columns")
@@ -160,12 +169,16 @@ def update_statcast_profiles(end_date: str = None):
         traceback.print_exc()
 
     # Build batter profiles using mlb_data (rich features) from FULL dataset
-    log("  Building batter profiles (rich features) from full dataset...")
+    # Uses exponential decay weighting for recency bias
+    log("  Building batter profiles (with exponential decay weighting)...")
     try:
         batter_profiles = get_batter_pitch_stats(
             DATA_START, end_date,
-            min_pitches=100,  # Higher threshold for multi-year data
-            pitches_df=data
+            min_pitches=100,
+            pitches_df=data,
+            use_decay=True,
+            performance_half_life=BATTER_PERF_HALF_LIFE,
+            batted_ball_half_life=BATTER_BATTED_BALL_HALF_LIFE,
         )
         batter_profiles.to_csv(output_dir / "batter_profiles.csv", index=False)
         log(f"  Saved {len(batter_profiles)} batter profiles with {len(batter_profiles.columns)} columns")
@@ -313,6 +326,15 @@ def compute_batter_rolling_latest(pitches_df: pd.DataFrame, windows: list[int]) 
     games = games.merge(chase_data, on=['batter', 'game_date'], how='left')
     games['zone_swings'] = games['zone_swings'].fillna(0)
     games['chase_swings'] = games['chase_swings'].fillna(0)
+
+    # Compute barrels separately (requires both launch_speed and launch_angle)
+    barrel_data = df[
+        (df['launch_speed'] >= 98) &
+        (df['launch_angle'].between(26, 30))
+    ].groupby(['batter', 'game_date']).size().reset_index(name='barrels')
+    games = games.merge(barrel_data, on=['batter', 'game_date'], how='left')
+    games['barrels'] = games['barrels'].fillna(0)
+
     games = games.sort_values(['batter', 'game_date'])
 
     # Compute rates
@@ -322,7 +344,7 @@ def compute_batter_rolling_latest(pitches_df: pd.DataFrame, windows: list[int]) 
     games['bb_rate'] = games['walks'] / games['pa_count'].replace(0, np.nan)
     games['zone_swing_rate'] = games['zone_swings'] / games['in_zone'].replace(0, np.nan)
     games['chase_rate'] = games['chase_swings'] / games['out_zone'].replace(0, np.nan)
-    games['barrel_rate'] = np.nan  # Simplified
+    games['barrel_rate'] = games['barrels'] / games['batted_balls'].replace(0, np.nan)
     games['hard_hit_rate'] = games['hard_hit'] / games['batted_balls'].replace(0, np.nan)
 
     rolling_stats = [
