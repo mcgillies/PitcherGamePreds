@@ -19,6 +19,9 @@ shap>=0.45.0
 # Optional: hyperparameter tuning (for neural network)
 keras-tuner>=1.4.0
 
+# Web app
+streamlit>=1.30.0
+
 # Development
 jupyter>=1.0.0
 matplotlib>=3.7.0
