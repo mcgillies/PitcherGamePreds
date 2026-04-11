@@ -496,9 +496,19 @@ class MatchupPreprocessor:
         self.numeric_columns, self.binary_columns = self.get_feature_columns(df)
         self.feature_columns = self.numeric_columns + self.binary_columns
 
-        # Fit scaler on numeric columns (handle NaN by filling with 0 for fitting)
-        numeric_data = df[self.numeric_columns].fillna(0).values
-        self.scaler.fit(numeric_data)
+        # Fit scaler on numeric columns using per-column mean/std (ignoring NaN)
+        # This avoids corrupting statistics when filling NaN with 0
+        numeric_df = df[self.numeric_columns]
+        col_means = numeric_df.mean().values  # ignores NaN by default
+        col_stds = numeric_df.std().values    # ignores NaN by default
+        col_stds = np.where(col_stds == 0, 1, col_stds)  # avoid div by zero
+
+        # Set scaler parameters directly
+        self.scaler.mean_ = col_means
+        self.scaler.scale_ = col_stds
+        self.scaler.var_ = col_stds ** 2
+        self.scaler.n_features_in_ = len(self.numeric_columns)
+        self.scaler.n_samples_seen_ = len(df)
 
         # Fit label encoder on outcomes
         self.label_encoder.fit(OUTCOME_CLASSES)
