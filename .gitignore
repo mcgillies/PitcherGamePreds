@@ -172,4 +172,4 @@ data/
 # Pipeline logs
 logs/
 
-reports/
+reports/catboost_info/
