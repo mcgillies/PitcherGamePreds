@@ -20,17 +20,25 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-    brier_score_loss,
-    log_loss,
-)
-from sklearn.feature_selection import SelectFromModel
-from sklearn.inspection import permutation_importance
-from flaml import AutoML
-import shap
+
+# Conditional imports for training (not needed for inference)
+try:
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import (
+        roc_auc_score,
+        average_precision_score,
+        brier_score_loss,
+        log_loss,
+    )
+    from sklearn.feature_selection import SelectFromModel
+    from sklearn.inspection import permutation_importance
+    from flaml import AutoML
+    import shap
+    TRAINING_DEPS_AVAILABLE = True
+except ImportError:
+    TRAINING_DEPS_AVAILABLE = False
+    AutoML = None
+    shap = None
 
 
 # Outcome classes (alphabetical to match sklearn LabelEncoder)
@@ -143,6 +151,11 @@ class BinaryModelEnsemble:
         Returns:
             Self for chaining
         """
+        if not TRAINING_DEPS_AVAILABLE:
+            raise ImportError(
+                "Training dependencies not available. "
+                "Install with: pip install flaml[automl] shap matplotlib scikit-learn"
+            )
         import gc
 
         if memory_efficient and save_dir is None:
@@ -456,8 +469,10 @@ class BinaryModelEnsemble:
         proba = self.predict_proba(X)
         return proba.argmax(axis=1)
 
-    def get_shap_explainer(self, outcome: str) -> shap.TreeExplainer:
+    def get_shap_explainer(self, outcome: str):
         """Get or create SHAP explainer for an outcome model."""
+        if not TRAINING_DEPS_AVAILABLE:
+            raise ImportError("shap is required for SHAP explanations. Install with: pip install shap")
         if outcome not in self.shap_explainers:
             model = self.models[outcome].model
             self.shap_explainers[outcome] = shap.TreeExplainer(model)
