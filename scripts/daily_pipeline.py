@@ -147,7 +147,7 @@ def update_statcast_profiles(end_date: str = None):
     clear_mem()
 
     # Build pitcher profiles using mlb_data (rich features) from FULL dataset
-    # Uses exponential decay weighting for recency bias
+    # Uses exponential decay weighting for recency bias (games-based, not calendar-based)
     log("  Building pitcher profiles (with exponential decay weighting)...")
     try:
         pitcher_profiles = get_pitcher_arsenal(
@@ -169,7 +169,7 @@ def update_statcast_profiles(end_date: str = None):
         traceback.print_exc()
 
     # Build batter profiles using mlb_data (rich features) from FULL dataset
-    # Uses exponential decay weighting for recency bias
+    # Uses exponential decay weighting for recency bias (games-based, not calendar-based)
     log("  Building batter profiles (with exponential decay weighting)...")
     try:
         batter_profiles = get_batter_pitch_stats(
@@ -379,16 +379,21 @@ def update_rolling_stats(pitches_df: pd.DataFrame = None):
     log("Updating rolling stats...")
 
     profiles_dir = PROJECT_ROOT / "data" / "profiles"
+    raw_dir = PROJECT_ROOT / "data" / "raw"
 
-    # Always load from plate_appearances.parquet for rolling stats
-    # This ensures we use the filtered PA data, not full pitches
-    pa_path = profiles_dir / "plate_appearances.parquet"
-    if not pa_path.exists():
-        log("  No plate appearances data found, skipping rolling stats")
+    # Load from pitches.parquet (all pitches) for accurate pitch-level stats
+    # like whiff%, chase%, zone_swing%. PA-level stats (K%, BB%) still work
+    # correctly since we aggregate by game first.
+    pitches_path = raw_dir / "pitches.parquet"
+    if not pitches_path.exists():
+        log("  No pitches data found, skipping rolling stats")
         return
 
-    pitches_df = pd.read_parquet(pa_path)
-    log(f"  Loaded {len(pitches_df):,} plate appearances")
+    pitches_df = pd.read_parquet(pitches_path)
+    # Filter out spring training
+    if 'game_type' in pitches_df.columns:
+        pitches_df = pitches_df[pitches_df['game_type'] != 'S']
+    log(f"  Loaded {len(pitches_df):,} pitches")
     clear_mem()
 
     # Calculate pitcher rolling stats with proper windows
@@ -531,7 +536,6 @@ def retrain_models():
     X = X.astype(np.float32)
     clear_mem()
 
-    # Train on ALL data (no val split for production)
     log(f"  Training on {len(X):,} samples (all data)")
 
     # Train ensemble with memory-efficient mode
@@ -553,6 +557,7 @@ def retrain_models():
         verbose=1,
         save_dir=output_dir,
         memory_efficient=True,  # Save models to disk, don't keep in memory
+        retrain_full=True,  # Retrain on all data after finding hyperparameters
     )
     log(f"  Model saved to {output_dir}")
     log("  Model training complete")
