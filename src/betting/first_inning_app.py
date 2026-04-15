@@ -392,18 +392,44 @@ class FirstInningPredictor:
             errors=errors if errors else None,
         )
 
-    def predict_day(self, game_date: str) -> list[FirstInningPrediction]:
-        """Predict first inning runs for all games on a date."""
+    def predict_day(self, game_date: str) -> tuple[list[FirstInningPrediction], dict]:
+        """Predict first inning runs for all games on a date.
+
+        Returns:
+            Tuple of (predictions, stats) where stats contains game counts by status
+        """
         season = int(game_date[:4])
         games = get_games_with_lineups(game_date)
 
         predictions = []
+        stats = {
+            "total": len(games),
+            "scheduled": 0,
+            "in_progress": 0,
+            "final": 0,
+            "no_lineups": 0,
+        }
+
         for game in games:
+            status = game.get("status", "").lower()
+
+            # Skip in-progress and completed games (1st inning already happened)
+            if any(s in status for s in ["progress", "final", "over", "completed"]):
+                if "progress" in status:
+                    stats["in_progress"] += 1
+                else:
+                    stats["final"] += 1
+                continue
+
+            stats["scheduled"] += 1
+
             pred = self.predict_game(game, season)
             if pred is not None:
                 predictions.append(pred)
+            else:
+                stats["no_lineups"] += 1
 
-        return predictions
+        return predictions, stats
 
 
 def get_model_version():
@@ -506,13 +532,31 @@ def main():
         try:
             model_version = get_model_version()
             predictor = get_predictor(model_version)
-            predictions = predictor.predict_day(date.today().isoformat())
+            predictions, stats = predictor.predict_day(date.today().isoformat())
         except Exception as e:
             st.error(f"Error loading predictions: {e}")
             predictions = []
+            stats = {}
+
+    # Show game status breakdown
+    if stats:
+        status_parts = []
+        if stats.get("in_progress", 0) > 0:
+            status_parts.append(f"{stats['in_progress']} in progress")
+        if stats.get("final", 0) > 0:
+            status_parts.append(f"{stats['final']} final")
+        if stats.get("no_lineups", 0) > 0:
+            status_parts.append(f"{stats['no_lineups']} awaiting lineups")
+        if status_parts:
+            st.caption(f"Games today: {stats.get('total', 0)} total ({', '.join(status_parts)})")
 
     if not predictions:
-        st.info("No games with complete lineups found for today.")
+        if stats.get("in_progress", 0) > 0 or stats.get("final", 0) > 0:
+            st.info("All scheduled games have started or completed. Check back tomorrow!")
+        elif stats.get("no_lineups", 0) > 0:
+            st.info("Games found but lineups not yet available. Check back closer to game time.")
+        else:
+            st.info("No games scheduled for today.")
         return
 
     st.write(f"**{len(predictions)} games** with predictions")
