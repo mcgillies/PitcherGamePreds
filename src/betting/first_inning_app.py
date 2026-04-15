@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from dataclasses import dataclass
 
 from src.data.mlb_api import get_games_with_lineups
@@ -432,6 +432,15 @@ class FirstInningPredictor:
         return predictions, stats
 
 
+def get_today_eastern() -> str:
+    """Get today's date in US Eastern time (for MLB games)."""
+    # US Eastern is UTC-5 (EST) or UTC-4 (EDT)
+    # Use UTC-4 during baseball season (April-October is DST)
+    eastern_offset = timedelta(hours=-4)
+    eastern_tz = timezone(eastern_offset)
+    return datetime.now(eastern_tz).date().isoformat()
+
+
 def get_model_version():
     """Get model version based on file modification times."""
     model_dir = Path("models/binary_ensemble")
@@ -525,14 +534,15 @@ def main():
     )
 
     st.title("1st Inning Runs Predictor (YRFI/NRFI)")
-    st.caption(f"Today: {date.today().isoformat()}")
+    today = get_today_eastern()
+    st.caption(f"Today: {today} (US Eastern)")
 
     # Load predictions
     with st.spinner("Loading predictions..."):
         try:
             model_version = get_model_version()
             predictor = get_predictor(model_version)
-            predictions, stats = predictor.predict_day(date.today().isoformat())
+            predictions, stats = predictor.predict_day(today)
         except Exception as e:
             st.error(f"Error loading predictions: {e}")
             predictions = []
