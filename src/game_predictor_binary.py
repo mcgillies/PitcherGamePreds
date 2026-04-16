@@ -36,8 +36,8 @@ class GamePredictorBinary:
         pitcher_rolling_path: str = "data/profiles/pitcher_rolling.csv",
         batter_rolling_path: str = "data/profiles/batter_rolling.csv",
         park_factors_path: str = "data/profiles/park_factors.csv",
-        rolling_starts: int = 5,
-        min_bf_filter: int = 18,
+        rolling_starts: int = 8,
+        bf_decay: float = 0.7,
         xwoba_sensitivity: float = 0.3,
     ):
         """
@@ -51,15 +51,15 @@ class GamePredictorBinary:
             pitcher_rolling_path: Path to pitcher rolling stats
             batter_rolling_path: Path to batter rolling stats
             park_factors_path: Path to park factors CSV
-            rolling_starts: Number of recent starts for BF average
-            min_bf_filter: Minimum BF to include a start (filters blown-up games)
+            rolling_starts: Number of recent starts to consider for BF average
+            bf_decay: Exponential decay rate for weighting starts (0.7-0.9, lower = more recent bias)
             xwoba_sensitivity: How much lineup xwOBA affects IP projection (0-1, default 0.5)
         """
         self.ensemble_dir = Path(ensemble_dir)
         self.ensemble = BinaryModelEnsemble.load(self.ensemble_dir)
         self.preprocessor = MatchupPreprocessor.load(preprocessor_path)
         self.rolling_starts = rolling_starts
-        self.min_bf_filter = min_bf_filter
+        self.bf_decay = bf_decay
         self.xwoba_sensitivity = xwoba_sensitivity
 
         # Load profiles
@@ -106,12 +106,10 @@ class GamePredictorBinary:
             Tuple of (expected_bf, bf_per_ip_ratio)
         """
         try:
-            # Fetch extra games to allow for filtering short outings
-            fetch_limit = self.rolling_starts + 5
             game_logs = get_pitcher_game_logs(
                 pitcher_id,
                 season=season,
-                limit=fetch_limit,
+                limit=self.rolling_starts,
             )
 
             # First, try to find starter appearances (high pitch count)
@@ -125,7 +123,7 @@ class GamePredictorBinary:
                 prev_logs = get_pitcher_game_logs(
                     pitcher_id,
                     season=season - 1,
-                    limit=fetch_limit,
+                    limit=self.rolling_starts,
                 )
                 starter_games.extend([
                     g for g in prev_logs
@@ -134,16 +132,12 @@ class GamePredictorBinary:
 
             # If we found starter appearances, use those
             if starter_games:
-                # Filter out blown-up starts (low BF) and take most recent
-                filtered_games = [g for g in starter_games if g["batters_faced"] >= self.min_bf_filter]
-                # Fall back to unfiltered if filter removes too many
-                if len(filtered_games) >= min_starts:
-                    starter_games = filtered_games[:self.rolling_starts]
-                else:
-                    starter_games = starter_games[:self.rolling_starts]
-
+                starter_games = starter_games[:self.rolling_starts]
                 bf_values = [g["batters_faced"] for g in starter_games]
-                expected_bf = float(np.median(bf_values))
+
+                # Decay-weighted average: recent starts weighted more heavily
+                weights = [self.bf_decay ** i for i in range(len(bf_values))]
+                expected_bf = float(np.average(bf_values, weights=weights))
 
                 # Calculate pitcher-specific BF/IP ratio
                 bf_per_ip = self._calculate_bf_per_ip(starter_games, default_bf_per_ip)
@@ -165,7 +159,9 @@ class GamePredictorBinary:
                 return default_bf, default_bf_per_ip
 
             bf_values = [g["batters_faced"] for g in all_games]
-            expected_bf = float(np.median(bf_values))
+            # Decay-weighted average for relievers too
+            weights = [self.bf_decay ** i for i in range(len(bf_values))]
+            expected_bf = float(np.average(bf_values, weights=weights))
             bf_per_ip = self._calculate_bf_per_ip(all_games, default_bf_per_ip)
 
             return expected_bf, bf_per_ip
