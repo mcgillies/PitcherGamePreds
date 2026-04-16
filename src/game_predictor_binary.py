@@ -36,7 +36,8 @@ class GamePredictorBinary:
         pitcher_rolling_path: str = "data/profiles/pitcher_rolling.csv",
         batter_rolling_path: str = "data/profiles/batter_rolling.csv",
         park_factors_path: str = "data/profiles/park_factors.csv",
-        rolling_starts: int = 10,
+        rolling_starts: int = 5,
+        min_bf_filter: int = 18,
         xwoba_sensitivity: float = 0.3,
     ):
         """
@@ -51,12 +52,14 @@ class GamePredictorBinary:
             batter_rolling_path: Path to batter rolling stats
             park_factors_path: Path to park factors CSV
             rolling_starts: Number of recent starts for BF average
+            min_bf_filter: Minimum BF to include a start (filters blown-up games)
             xwoba_sensitivity: How much lineup xwOBA affects IP projection (0-1, default 0.5)
         """
         self.ensemble_dir = Path(ensemble_dir)
         self.ensemble = BinaryModelEnsemble.load(self.ensemble_dir)
         self.preprocessor = MatchupPreprocessor.load(preprocessor_path)
         self.rolling_starts = rolling_starts
+        self.min_bf_filter = min_bf_filter
         self.xwoba_sensitivity = xwoba_sensitivity
 
         # Load profiles
@@ -103,10 +106,12 @@ class GamePredictorBinary:
             Tuple of (expected_bf, bf_per_ip_ratio)
         """
         try:
+            # Fetch extra games to allow for filtering short outings
+            fetch_limit = self.rolling_starts + 5
             game_logs = get_pitcher_game_logs(
                 pitcher_id,
                 season=season,
-                limit=self.rolling_starts,
+                limit=fetch_limit,
             )
 
             # First, try to find starter appearances (high pitch count)
@@ -120,7 +125,7 @@ class GamePredictorBinary:
                 prev_logs = get_pitcher_game_logs(
                     pitcher_id,
                     season=season - 1,
-                    limit=self.rolling_starts,
+                    limit=fetch_limit,
                 )
                 starter_games.extend([
                     g for g in prev_logs
@@ -129,6 +134,14 @@ class GamePredictorBinary:
 
             # If we found starter appearances, use those
             if starter_games:
+                # Filter out blown-up starts (low BF) and take most recent
+                filtered_games = [g for g in starter_games if g["batters_faced"] >= self.min_bf_filter]
+                # Fall back to unfiltered if filter removes too many
+                if len(filtered_games) >= min_starts:
+                    starter_games = filtered_games[:self.rolling_starts]
+                else:
+                    starter_games = starter_games[:self.rolling_starts]
+
                 bf_values = [g["batters_faced"] for g in starter_games]
                 expected_bf = float(np.median(bf_values))
 
