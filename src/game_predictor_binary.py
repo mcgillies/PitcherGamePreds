@@ -386,6 +386,9 @@ class GamePredictorBinary:
         """
         # Get pitcher's baseline expected BF and their personal BF/IP ratio
         baseline_bf, bf_per_ip = self.get_expected_batters_faced(pitcher_id, season)
+        # Apply efficiency adjustment: assume slightly fewer batters per IP than historical avg
+        # This adds ~0.25-0.30 IP to projections (historical BF/IP includes pulled-early games)
+        bf_per_ip = bf_per_ip * 0.95
         xwoba_factor = self.get_lineup_xwoba_factor(lineup, season)
 
         if expected_bf is None:
