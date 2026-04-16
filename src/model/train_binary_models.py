@@ -215,6 +215,7 @@ class BinaryModelEnsemble:
             }
 
             # Set minimum leaves AND minimum trees to prevent underfitting
+            # Also constrain regularization to prevent mean regression
             from flaml import tune
             automl_settings["custom_hp"] = {
                 "lgbm": {
@@ -224,6 +225,12 @@ class BinaryModelEnsemble:
                     "n_estimators": {
                         "domain": tune.randint(100, 1000),  # Force at least 100 trees
                     },
+                    "reg_alpha": {
+                        "domain": tune.uniform(0.0, 0.1),  # Low L1 regularization
+                    },
+                    "reg_lambda": {
+                        "domain": tune.uniform(0.01, 1.0),  # Low L2 to avoid mean regression
+                    },
                 },
                 "xgboost": {
                     "max_leaves": {
@@ -231,6 +238,12 @@ class BinaryModelEnsemble:
                     },
                     "n_estimators": {
                         "domain": tune.randint(100, 1000),
+                    },
+                    "reg_alpha": {
+                        "domain": tune.uniform(0.0, 0.1),
+                    },
+                    "reg_lambda": {
+                        "domain": tune.uniform(0.01, 1.0),
                     },
                 },
             }
