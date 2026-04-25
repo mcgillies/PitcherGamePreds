@@ -135,9 +135,15 @@ class GamePredictorBinary:
                 starter_games = starter_games[:self.rolling_starts]
                 bf_values = [g["batters_faced"] for g in starter_games]
 
+                # Winsorize: cap outliers at median ± 3 to reduce volatility
+                median_bf = float(np.median(bf_values))
+                bf_cap = median_bf + 3
+                bf_floor = median_bf - 3
+                bf_winsorized = [max(bf_floor, min(bf_cap, bf)) for bf in bf_values]
+
                 # Decay-weighted average: recent starts weighted more heavily
-                weights = [self.bf_decay ** i for i in range(len(bf_values))]
-                expected_bf = float(np.average(bf_values, weights=weights))
+                weights = [self.bf_decay ** i for i in range(len(bf_winsorized))]
+                expected_bf = float(np.average(bf_winsorized, weights=weights))
 
                 # Calculate pitcher-specific BF/IP ratio
                 bf_per_ip = self._calculate_bf_per_ip(starter_games, default_bf_per_ip)
@@ -159,9 +165,15 @@ class GamePredictorBinary:
                 return default_bf, default_bf_per_ip
 
             bf_values = [g["batters_faced"] for g in all_games]
+            # Winsorize: cap outliers at median ± 3
+            median_bf = float(np.median(bf_values))
+            bf_cap = median_bf + 3
+            bf_floor = median_bf - 3
+            bf_winsorized = [max(bf_floor, min(bf_cap, bf)) for bf in bf_values]
+
             # Decay-weighted average for relievers too
-            weights = [self.bf_decay ** i for i in range(len(bf_values))]
-            expected_bf = float(np.average(bf_values, weights=weights))
+            weights = [self.bf_decay ** i for i in range(len(bf_winsorized))]
+            expected_bf = float(np.average(bf_winsorized, weights=weights))
             bf_per_ip = self._calculate_bf_per_ip(all_games, default_bf_per_ip)
 
             return expected_bf, bf_per_ip
