@@ -381,7 +381,7 @@ class GamePredictorBinary:
         season: int,
         expected_bf: float | None = None,
         target_innings: float | None = None,
-        n_simulations: int = 100,
+        n_simulations: int = 1000,
         seed: int | None = None,
         park_factor: float = 1.0,
     ) -> dict[str, Any]:
