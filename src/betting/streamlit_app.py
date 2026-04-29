@@ -14,8 +14,9 @@ import streamlit as st
 import pandas as pd
 from datetime import date, datetime
 
-from src.betting import odds, database, value
+from src.betting import espn_odds, database, value
 from src.betting.database import Bet, BetStatus, BetSide
+from src.betting.auto_bet import place_auto_bets, get_auto_bet_summary
 from src.game_predictor_binary import GamePredictorBinary
 
 st.set_page_config(
@@ -125,13 +126,8 @@ def render_today():
     props = []
     value_bets = []
 
-    # Odds fetching section
-    st.subheader("Odds")
-
-    # Show current quota if we have it
-    if 'quota' in st.session_state:
-        quota = st.session_state['quota']
-        st.info(f"API Requests: {quota['requests_remaining']} remaining this month")
+    # Odds fetching section (ESPN - free, no API key needed)
+    st.subheader("Odds (DraftKings via ESPN)")
 
     # Count games with lineups
     games_with_lineups = [g for g in predictions if g.get('status') == 'complete']
@@ -140,57 +136,17 @@ def render_today():
     col1, col2 = st.columns([2, 1])
     with col1:
         st.write(f"**{total_games} games** today ({len(games_with_lineups)} with full lineups)")
-        st.caption(f"Fetching odds will use ~{total_games + 1} API requests")
 
     with col2:
-        if st.button("Fetch All Odds", type="primary"):
-            with st.spinner(f"Fetching odds for {total_games} games..."):
+        if st.button("Fetch Odds", type="primary"):
+            with st.spinner("Fetching odds from ESPN..."):
                 try:
-                    props = odds.get_todays_pitcher_props()
-                    quota = odds.get_remaining_requests()
+                    props = espn_odds.get_todays_pitcher_props()
                     st.success(f"Loaded {len(props)} props")
                     st.session_state['props'] = props
-                    st.session_state['quota'] = quota
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error fetching odds: {e}")
-
-    # Single game fetch option (uses only 2 requests)
-    with st.expander("Fetch odds for single game (saves API requests)"):
-        try:
-            events = odds.get_events()
-            today = date.today().isoformat()
-            todays_events = [e for e in events if e.get('commence_time', '').startswith(today)]
-
-            game_options = {f"{e['away_team']} @ {e['home_team']}": e['id'] for e in todays_events}
-
-            selected_game = st.selectbox("Select game", list(game_options.keys()))
-
-            if st.button("Fetch This Game"):
-                event_id = game_options[selected_game]
-                with st.spinner("Fetching..."):
-                    props_data = odds.get_player_props(event_id)
-                    new_props = odds.parse_pitcher_props(props_data)
-
-                    # Add game context
-                    event = next(e for e in todays_events if e['id'] == event_id)
-                    for prop in new_props:
-                        prop['home_team'] = event.get('home_team')
-                        prop['away_team'] = event.get('away_team')
-                        prop['commence_time'] = event.get('commence_time')
-
-                    # Merge with existing props
-                    existing = st.session_state.get('props', [])
-                    # Remove old props for this game
-                    existing = [p for p in existing if p.get('event_id') != event_id]
-                    existing.extend(new_props)
-
-                    st.session_state['props'] = existing
-                    st.session_state['quota'] = odds.get_remaining_requests()
-                    st.success(f"Loaded {len(new_props)} props for {selected_game}")
-                    st.rerun()
-        except Exception as e:
-            st.error(f"Error: {e}")
 
     # Use cached props if available
     if 'props' in st.session_state:
@@ -201,21 +157,10 @@ def render_today():
         with col2:
             if st.button("Clear Cache", type="secondary"):
                 del st.session_state['props']
-                if 'quota' in st.session_state:
-                    del st.session_state['quota']
                 st.rerun()
 
-    # Book filter
-    if props:
-        available_books = sorted(set(p['bookmaker'] for p in props))
-        selected_book = st.selectbox("Select Bookmaker", available_books, index=0)
-
-        # Filter props by selected book
-        filtered_props = [p for p in props if p['bookmaker'] == selected_book]
-        st.caption(f"Showing {len(filtered_props)} props from {selected_book}")
-    else:
-        filtered_props = []
-        selected_book = None
+    # Props are all from DraftKings via ESPN
+    filtered_props = props
 
     # Find value bets
     if filtered_props:
@@ -369,8 +314,16 @@ def render_today():
     else:
         st.info("Load predictions first to place custom bets.")
 
-    # All predictions
+    # All predictions with odds
     st.subheader("All Predictions")
+
+    # Build props lookup by pitcher name for quick access
+    props_by_pitcher = {}
+    for prop in filtered_props:
+        pitcher = prop.get('pitcher_name', '').lower()
+        if pitcher not in props_by_pitcher:
+            props_by_pitcher[pitcher] = []
+        props_by_pitcher[pitcher].append(prop)
 
     for game in predictions:
         with st.expander(f"{game['away_team']} @ {game['home_team']} (PF: {game.get('park_factor', 1.0):.2f})"):
@@ -389,6 +342,42 @@ def render_today():
                             'ERA': pred['expected_stats'].get('ERA_approx', '-'),
                         }])
                         st.dataframe(stats_df, hide_index=True)
+
+                        # Show ESPN odds if available
+                        pitcher_name = pred['pitcher_name'].lower()
+                        pitcher_props = props_by_pitcher.get(pitcher_name, [])
+                        if not pitcher_props:
+                            # Try partial match
+                            for pname, plist in props_by_pitcher.items():
+                                name_parts = set(pitcher_name.split())
+                                prop_parts = set(pname.split())
+                                if len(name_parts & prop_parts) >= 2:
+                                    pitcher_props = plist
+                                    break
+
+                        if pitcher_props:
+                            st.write("**DraftKings Lines:**")
+                            for prop in pitcher_props:
+                                prop_type = prop['prop_type']
+                                line = prop['line']
+                                over_odds = prop.get('over_odds')
+                                under_odds = prop.get('under_odds')
+
+                                # Format odds strings
+                                over_str = f"{over_odds:+d}" if over_odds is not None else "-"
+                                under_str = f"{under_odds:+d}" if under_odds is not None else "-"
+
+                                # Get model prediction for comparison
+                                stat_map = {"strikeouts": "K", "hits_allowed": "H"}
+                                model_val = pred['expected_stats'].get(stat_map.get(prop_type, ''), None)
+
+                                if model_val:
+                                    edge = model_val - line
+                                    edge_str = f" (Edge: {edge:+.1f})"
+                                else:
+                                    edge_str = ""
+
+                                st.caption(f"{prop_type}: O/U {line} (O:{over_str}, U:{under_str}){edge_str}")
                     else:
                         st.write(f"**{side.upper()}** - No prediction")
 
@@ -469,11 +458,155 @@ def render_history():
     st.dataframe(df, use_container_width=True)
 
 
+def render_auto_bets():
+    """Render auto-bets tracking tab."""
+    st.header("Auto Bets")
+    st.caption("Automatic $1 bets on all matching props to track model performance")
+
+    # Auto bet summary
+    summary = get_auto_bet_summary()
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric(
+            "Total Auto Bets",
+            summary['total_bets'],
+            f"{summary['pending']} pending",
+        )
+
+    with col2:
+        st.metric(
+            "Record",
+            f"{summary['wins']}W-{summary['losses']}L-{summary['pushes']}P",
+            f"{summary['win_rate']*100:.1f}% win rate",
+        )
+
+    with col3:
+        st.metric(
+            "Total P&L",
+            f"${summary['total_pnl']:+.2f}",
+            f"{summary['roi']:.1f}% ROI",
+        )
+
+    with col4:
+        # Calculate units profit (each bet is $1)
+        units = summary['total_pnl']
+        st.metric(
+            "Units",
+            f"{units:+.1f}u",
+            f"per {summary['total_bets'] - summary['pending']} settled",
+        )
+
+    # Place auto bets button
+    st.subheader("Place Today's Auto Bets")
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        if st.button("Run Auto Bets", type="primary"):
+            with st.spinner("Placing auto bets..."):
+                try:
+                    bets = place_auto_bets()
+                    if bets:
+                        st.success(f"Placed {len(bets)} auto bets!")
+                        for bet in bets:
+                            st.write(f"- {bet['pitcher']}: {bet['prop_type']} {bet['side'].upper()} {bet['line']} @ {bet['odds']:+d}")
+                    else:
+                        st.info("No new auto bets to place (may already exist for today)")
+                except Exception as e:
+                    st.error(f"Error placing auto bets: {e}")
+
+    with col2:
+        dry_run = st.checkbox("Dry run (show what would be bet)")
+        if dry_run:
+            with st.spinner("Simulating auto bets..."):
+                try:
+                    bets = place_auto_bets(dry_run=True)
+                    if bets:
+                        st.write(f"**Would place {len(bets)} bets:**")
+                        for bet in bets:
+                            st.write(f"- {bet['pitcher']}: {bet['prop_type']} {bet['side'].upper()} {bet['line']} (Model: {bet['model_prediction']:.1f}, Edge: {bet['edge']:.2f})")
+                    else:
+                        st.info("No matching props found")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    # Cumulative P&L chart
+    st.subheader("Cumulative P&L")
+
+    pnl_data = database.get_cumulative_pnl(is_auto=True)
+    if pnl_data:
+        df = pd.DataFrame(pnl_data)
+        df['game_date'] = pd.to_datetime(df['game_date'])
+        st.line_chart(df.set_index('game_date')['cumulative_pnl'])
+    else:
+        st.info("No settled auto bets yet")
+
+    # Compare manual vs auto
+    st.subheader("Manual vs Auto Performance")
+
+    manual_stats = database.get_stats_by_type(is_auto=False)
+    auto_stats = database.get_stats_by_type(is_auto=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**Manual Bets**")
+        st.write(f"Record: {manual_stats['wins']}W-{manual_stats['losses']}L-{manual_stats['pushes']}P")
+        st.write(f"Win Rate: {manual_stats['win_rate']*100:.1f}%")
+        st.write(f"P&L: ${manual_stats['total_pnl']:+.2f}")
+        st.write(f"ROI: {manual_stats['roi']:.1f}%")
+
+    with col2:
+        st.write("**Auto Bets**")
+        st.write(f"Record: {auto_stats['wins']}W-{auto_stats['losses']}L-{auto_stats['pushes']}P")
+        st.write(f"Win Rate: {auto_stats['win_rate']*100:.1f}%")
+        st.write(f"P&L: ${auto_stats['total_pnl']:+.2f}")
+        st.write(f"ROI: {auto_stats['roi']:.1f}%")
+
+    # Side-by-side P&L charts
+    st.subheader("Cumulative P&L Comparison")
+
+    manual_pnl = database.get_cumulative_pnl(is_auto=False)
+    auto_pnl = database.get_cumulative_pnl(is_auto=True)
+
+    if manual_pnl or auto_pnl:
+        # Merge data for comparison chart
+        chart_data = {}
+        if manual_pnl:
+            for row in manual_pnl:
+                chart_data[row['game_date']] = {'Manual': row['cumulative_pnl']}
+        if auto_pnl:
+            for row in auto_pnl:
+                if row['game_date'] in chart_data:
+                    chart_data[row['game_date']]['Auto'] = row['cumulative_pnl']
+                else:
+                    chart_data[row['game_date']] = {'Auto': row['cumulative_pnl']}
+
+        if chart_data:
+            df = pd.DataFrame.from_dict(chart_data, orient='index')
+            df.index = pd.to_datetime(df.index)
+            df = df.sort_index()
+            df = df.ffill().fillna(0)
+            st.line_chart(df)
+
+    # Recent auto bets
+    st.subheader("Recent Auto Bets")
+    auto_bets = database.get_bets(is_auto=True, limit=20)
+
+    if auto_bets:
+        df = pd.DataFrame([b.to_dict() for b in auto_bets])
+        df = df[['game_date', 'pitcher_name', 'prop_type', 'side', 'line', 'odds', 'model_prediction', 'model_edge', 'status', 'actual_result', 'pnl']]
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No auto bets yet")
+
+
 def main():
     st.title("⚾ Pitcher Props Betting Sim")
 
     # Tabs
-    tab1, tab2, tab3 = st.tabs(["Dashboard", "Today's Games", "Bet History"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Today's Games", "Auto Bets", "Bet History"])
 
     with tab1:
         render_dashboard()
@@ -482,6 +615,9 @@ def main():
         render_today()
 
     with tab3:
+        render_auto_bets()
+
+    with tab4:
         render_history()
 
 
