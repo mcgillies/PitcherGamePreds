@@ -45,6 +45,7 @@ class Bet:
     pnl: float | None
     home_team: str
     away_team: str
+    is_auto: bool = False  # True for auto-bets, False for manual bets
 
     def to_dict(self) -> dict:
         return {
@@ -65,6 +66,7 @@ class Bet:
             "pnl": self.pnl,
             "home_team": self.home_team,
             "away_team": self.away_team,
+            "is_auto": self.is_auto,
         }
 
 
@@ -100,9 +102,16 @@ def init_db():
             actual_result REAL,
             pnl REAL,
             home_team TEXT,
-            away_team TEXT
+            away_team TEXT,
+            is_auto INTEGER DEFAULT 0
         )
     """)
+
+    # Add is_auto column if it doesn't exist (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE bets ADD COLUMN is_auto INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
     # Bankroll history table
     cursor.execute("""
@@ -180,16 +189,21 @@ def update_bankroll(new_balance: float, change_amount: float, reason: str, conn:
         conn.close()
 
 
-def add_bet(bet: Bet) -> int:
-    """Add a new bet to the database. Returns bet ID."""
+def add_bet(bet: Bet, track_bankroll: bool = True) -> int:
+    """Add a new bet to the database. Returns bet ID.
+
+    Args:
+        bet: The bet to add
+        track_bankroll: If True, deduct stake from bankroll. Set False for auto-bets.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
         INSERT INTO bets (
             game_date, pitcher_name, prop_type, line, side, odds, stake,
-            model_prediction, model_edge, bookmaker, status, home_team, away_team
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            model_prediction, model_edge, bookmaker, status, home_team, away_team, is_auto
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         bet.game_date,
         bet.pitcher_name,
@@ -204,16 +218,18 @@ def add_bet(bet: Bet) -> int:
         bet.status.value if isinstance(bet.status, BetStatus) else bet.status,
         bet.home_team,
         bet.away_team,
+        1 if bet.is_auto else 0,
     ))
 
     bet_id = cursor.lastrowid
 
-    # Update bankroll (subtract stake) - use same connection to avoid lock
-    cursor.execute("SELECT balance FROM bankroll_history ORDER BY id DESC LIMIT 1")
-    row = cursor.fetchone()
-    current = row["balance"] if row else 10.0
-    new_balance = current - bet.stake
-    update_bankroll(new_balance, -bet.stake, f"Bet #{bet_id} placed", conn)
+    # Update bankroll (subtract stake) - skip for auto bets
+    if track_bankroll and not bet.is_auto:
+        cursor.execute("SELECT balance FROM bankroll_history ORDER BY id DESC LIMIT 1")
+        row = cursor.fetchone()
+        current = row["balance"] if row else 10.0
+        new_balance = current - bet.stake
+        update_bankroll(new_balance, -bet.stake, f"Bet #{bet_id} placed", conn)
 
     conn.commit()
     conn.close()
@@ -327,12 +343,14 @@ def get_bet(bet_id: int) -> Bet | None:
         pnl=row["pnl"],
         home_team=row["home_team"],
         away_team=row["away_team"],
+        is_auto=bool(row["is_auto"]) if "is_auto" in row.keys() else False,
     )
 
 
 def get_bets(
     status: BetStatus | None = None,
     game_date: str | None = None,
+    is_auto: bool | None = None,
     limit: int = 100,
 ) -> list[Bet]:
     """Get bets with optional filters."""
@@ -348,6 +366,9 @@ def get_bets(
     if game_date:
         query += " AND game_date = ?"
         params.append(game_date)
+    if is_auto is not None:
+        query += " AND is_auto = ?"
+        params.append(1 if is_auto else 0)
 
     query += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
@@ -375,6 +396,7 @@ def get_bets(
             pnl=row["pnl"],
             home_team=row["home_team"],
             away_team=row["away_team"],
+            is_auto=bool(row["is_auto"]) if "is_auto" in row.keys() else False,
         )
         for row in rows
     ]
@@ -480,6 +502,104 @@ def get_stats() -> dict:
         "bankroll_change": current - starting,
         "bankroll_change_pct": ((current - starting) / starting * 100) if starting > 0 else 0,
     }
+
+
+def get_stats_by_type(is_auto: bool | None = None) -> dict:
+    """Get betting statistics filtered by bet type (auto vs manual)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    where_clause = "WHERE 1=1"
+    params = []
+    if is_auto is not None:
+        where_clause += " AND is_auto = ?"
+        params.append(1 if is_auto else 0)
+
+    # Total bets
+    cursor.execute(f"SELECT COUNT(*) as total FROM bets {where_clause}", params)
+    total = cursor.fetchone()["total"]
+
+    # Wins/losses
+    cursor.execute(f"SELECT status, COUNT(*) as count FROM bets {where_clause} GROUP BY status", params)
+    status_counts = {row["status"]: row["count"] for row in cursor.fetchall()}
+
+    # Total P&L
+    cursor.execute(f"SELECT SUM(pnl) as total_pnl FROM bets {where_clause} AND pnl IS NOT NULL", params)
+    total_pnl = cursor.fetchone()["total_pnl"] or 0
+
+    # Total staked
+    cursor.execute(f"SELECT SUM(stake) as total_staked FROM bets {where_clause}", params)
+    total_staked = cursor.fetchone()["total_staked"] or 0
+
+    conn.close()
+
+    wins = status_counts.get("won", 0)
+    losses = status_counts.get("lost", 0)
+    settled = wins + losses + status_counts.get("push", 0)
+
+    return {
+        "total_bets": total,
+        "pending": status_counts.get("pending", 0),
+        "wins": wins,
+        "losses": losses,
+        "pushes": status_counts.get("push", 0),
+        "win_rate": wins / settled if settled > 0 else 0,
+        "total_pnl": total_pnl,
+        "total_staked": total_staked,
+        "roi": (total_pnl / total_staked * 100) if total_staked > 0 else 0,
+    }
+
+
+def get_cumulative_pnl(is_auto: bool | None = None) -> list[dict]:
+    """Get cumulative P&L over time for charting."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    where_clause = "WHERE status IN ('won', 'lost', 'push')"
+    params = []
+    if is_auto is not None:
+        where_clause += " AND is_auto = ?"
+        params.append(1 if is_auto else 0)
+
+    cursor.execute(f"""
+        SELECT game_date, pnl, pitcher_name, prop_type, side, line, status
+        FROM bets
+        {where_clause}
+        ORDER BY game_date, created_at
+    """, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    cumulative = 0
+    results = []
+    for row in rows:
+        pnl = row["pnl"] or 0
+        cumulative += pnl
+        results.append({
+            "game_date": row["game_date"],
+            "pnl": pnl,
+            "cumulative_pnl": cumulative,
+            "pitcher_name": row["pitcher_name"],
+            "prop_type": row["prop_type"],
+            "side": row["side"],
+            "line": row["line"],
+            "status": row["status"],
+        })
+
+    return results
+
+
+def auto_bets_exist_for_date(game_date: str) -> bool:
+    """Check if auto bets have already been placed for a date."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) as count FROM bets WHERE game_date = ? AND is_auto = 1",
+        (game_date,)
+    )
+    count = cursor.fetchone()["count"]
+    conn.close()
+    return count > 0
 
 
 # Initialize DB on import
