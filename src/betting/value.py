@@ -5,7 +5,7 @@ Value detection - compare model predictions to betting odds.
 from dataclasses import dataclass
 from typing import Any
 
-from .odds import american_to_implied_prob, american_to_decimal
+from .espn_odds import american_to_implied_prob, american_to_decimal
 
 
 @dataclass
