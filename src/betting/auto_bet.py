@@ -10,6 +10,8 @@ from datetime import date
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import gc
+
 from src.betting import espn_odds, database
 from src.betting.database import Bet, BetStatus, BetSide
 from src.game_predictor_binary import GamePredictorBinary
@@ -71,10 +73,16 @@ def place_auto_bets(game_date: str | None = None, dry_run: bool = False) -> list
     if game_date is None:
         game_date = date.today().isoformat()
 
-    # Check if we already placed auto bets for this date
-    if database.auto_bets_exist_for_date(game_date):
-        print(f"Auto bets already exist for {game_date}")
-        return []
+    # Get existing auto bets for this date to avoid duplicates
+    existing_bets = database.get_bets(game_date=game_date, is_auto=True)
+    already_bet = set()
+    for bet in existing_bets:
+        # Track pitcher+prop_type combos we've already bet on
+        key = (bet.pitcher_name.lower(), bet.prop_type)
+        already_bet.add(key)
+
+    if already_bet:
+        print(f"Already have {len(already_bet)} auto bets for {game_date}, checking for new props...")
 
     # Get predictions
     predictor = get_predictor()
@@ -113,6 +121,12 @@ def place_auto_bets(game_date: str | None = None, dry_run: bool = False) -> list
         # Find matching prediction
         for pred in pitcher_preds:
             if not match_prediction_to_prop(pred, prop):
+                continue
+
+            # Skip if we already bet on this pitcher+prop_type
+            pitcher_name = pred.get("pitcher_name", "")
+            bet_key = (pitcher_name.lower(), prop_type)
+            if bet_key in already_bet:
                 continue
 
             # Get model's prediction for this prop type
@@ -177,6 +191,10 @@ def place_auto_bets(game_date: str | None = None, dry_run: bool = False) -> list
 
             bets_placed.append(bet_info)
             break  # Only one bet per pitcher per prop type
+
+    # Clean up predictor to free memory
+    del predictor
+    gc.collect()
 
     return bets_placed
 
