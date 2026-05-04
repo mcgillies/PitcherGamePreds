@@ -56,10 +56,14 @@ def get_predictor(_model_version: str):
 
 
 def render_dashboard():
-    """Render main dashboard with stats."""
+    """Render main dashboard with stats (manual bets only)."""
     st.header("Dashboard")
+    st.caption("Manual bets only (see Auto Bets tab for automated tracking)")
 
-    stats = database.get_stats()
+    # Bankroll info from main stats (already manual-only in bankroll_history)
+    bankroll_stats = database.get_stats()
+    # Bet record from manual bets only
+    manual_stats = database.get_stats_by_type(is_auto=False)
 
     # Top metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -67,29 +71,29 @@ def render_dashboard():
     with col1:
         st.metric(
             "Current Bankroll",
-            f"${stats['current_bankroll']:.2f}",
-            f"{stats['bankroll_change']:+.2f}",
+            f"${bankroll_stats['current_bankroll']:.2f}",
+            f"{bankroll_stats['bankroll_change']:+.2f}",
         )
 
     with col2:
         st.metric(
             "Total P&L",
-            f"${stats['total_pnl']:+.2f}",
-            f"{stats['roi']:.1f}% ROI",
+            f"${manual_stats['total_pnl']:+.2f}",
+            f"{manual_stats['roi']:.1f}% ROI",
         )
 
     with col3:
         st.metric(
             "Win Rate",
-            f"{stats['win_rate']*100:.1f}%",
-            f"{stats['wins']}W-{stats['losses']}L-{stats['pushes']}P",
+            f"{manual_stats['win_rate']*100:.1f}%",
+            f"{manual_stats['wins']}W-{manual_stats['losses']}L-{manual_stats['pushes']}P",
         )
 
     with col4:
         st.metric(
             "Total Bets",
-            stats['total_bets'],
-            f"{stats['pending']} pending",
+            manual_stats['total_bets'],
+            f"{manual_stats['pending']} pending",
         )
 
     # Bankroll chart
@@ -100,15 +104,15 @@ def render_dashboard():
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         st.line_chart(df.set_index('timestamp')['balance'])
 
-    # Recent bets
+    # Recent bets (manual only)
     st.subheader("Recent Bets")
-    recent = database.get_bets(limit=10)
+    recent = database.get_bets(is_auto=False, limit=10)
     if recent:
         df = pd.DataFrame([b.to_dict() for b in recent])
         df = df[['game_date', 'pitcher_name', 'prop_type', 'side', 'line', 'odds', 'stake', 'status', 'pnl']]
         st.dataframe(df, use_container_width=True)
     else:
-        st.info("No bets yet. Go to Today's Games to find value!")
+        st.info("No manual bets yet. Go to Today's Games to find value!")
 
 
 def render_today():
@@ -458,10 +462,71 @@ def render_history():
     st.dataframe(df, use_container_width=True)
 
 
+def is_betting_hours() -> bool:
+    """Check if current time is within betting hours (10am-6pm Mountain)."""
+    import pytz
+    mountain = pytz.timezone('America/Denver')
+    now = datetime.now(mountain)
+    return 10 <= now.hour < 18
+
+
+def auto_place_bets_on_load():
+    """Automatically try to place bets when page loads (within betting hours)."""
+    # Track last auto-check time to avoid hammering API
+    last_check_key = 'last_auto_bet_check'
+    now = datetime.now()
+
+    # Only check once per 30 minutes
+    if last_check_key in st.session_state:
+        last_check = st.session_state[last_check_key]
+        minutes_since = (now - last_check).total_seconds() / 60
+        if minutes_since < 30:
+            return None, False  # Too soon, skip
+
+    # Only during betting hours
+    if not is_betting_hours():
+        return None, False
+
+    st.session_state[last_check_key] = now
+
+    try:
+        bets = place_auto_bets()
+        return bets, True
+    except Exception as e:
+        return str(e), False
+
+
 def render_auto_bets():
     """Render auto-bets tracking tab."""
     st.header("Auto Bets")
     st.caption("Automatic $1 bets on all matching props to track model performance")
+
+    # Auto-refresh toggle (reloads page every 30 min during betting hours)
+    auto_refresh = st.checkbox("Auto-refresh every 30 min", value=True, key="auto_refresh_toggle")
+
+    if auto_refresh and is_betting_hours():
+        # Use meta refresh tag to reload page after 30 minutes
+        st.markdown(
+            '<meta http-equiv="refresh" content="1800">',
+            unsafe_allow_html=True
+        )
+        st.caption("Page will auto-refresh in 30 min to check for new props")
+
+    # Auto-place bets on page load (during betting hours)
+    auto_result, did_check = auto_place_bets_on_load()
+    if did_check:
+        if isinstance(auto_result, list) and auto_result:
+            st.success(f"Auto-placed {len(auto_result)} new bets on page load!")
+            for bet in auto_result:
+                st.write(f"- {bet['pitcher']}: {bet['prop_type']} {bet['side'].upper()} {bet['line']} @ {bet['odds']:+d}")
+        elif isinstance(auto_result, str):
+            st.warning(f"Auto-bet check failed: {auto_result}")
+
+    # Show betting hours status
+    if is_betting_hours():
+        st.info("Within betting hours (10am-6pm MT) - checking for new props on each page load")
+    else:
+        st.caption("Outside betting hours (10am-6pm MT) - auto-refresh paused")
 
     # Auto bet summary
     summary = get_auto_bet_summary()
@@ -503,16 +568,18 @@ def render_auto_bets():
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        if st.button("Run Auto Bets", type="primary"):
-            with st.spinner("Placing auto bets..."):
+        if st.button("Check & Place Bets Now", type="primary"):
+            with st.spinner("Checking for props and placing bets..."):
                 try:
                     bets = place_auto_bets()
                     if bets:
                         st.success(f"Placed {len(bets)} auto bets!")
                         for bet in bets:
                             st.write(f"- {bet['pitcher']}: {bet['prop_type']} {bet['side'].upper()} {bet['line']} @ {bet['odds']:+d}")
+                        st.session_state['last_auto_bet_check'] = datetime.now()
+                        st.rerun()
                     else:
-                        st.info("No new auto bets to place (may already exist for today)")
+                        st.info("No new auto bets to place (already placed or no props available)")
                 except Exception as e:
                     st.error(f"Error placing auto bets: {e}")
 

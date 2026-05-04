@@ -290,23 +290,25 @@ def settle_bet(bet_id: int, actual_result: float):
         WHERE id = ?
     """, (status.value, actual_result, pnl, bet_id))
 
-    # Update bankroll (add back stake + pnl for wins, just stake for push)
-    cursor.execute("SELECT balance FROM bankroll_history ORDER BY id DESC LIMIT 1")
-    row = cursor.fetchone()
-    current = row["balance"] if row else 10.0
+    # Update bankroll only for manual bets (auto bets don't affect bankroll)
+    is_auto = bool(row["is_auto"]) if "is_auto" in row.keys() else False
+    if not is_auto:
+        cursor.execute("SELECT balance FROM bankroll_history ORDER BY id DESC LIMIT 1")
+        bankroll_row = cursor.fetchone()
+        current = bankroll_row["balance"] if bankroll_row else 10.0
 
-    if status == BetStatus.WON:
-        change = stake + pnl  # Return stake plus winnings
-        reason = f"Bet #{bet_id} won (+{pnl:.2f})"
-    elif status == BetStatus.PUSH:
-        change = stake  # Return stake
-        reason = f"Bet #{bet_id} pushed"
-    else:
-        change = 0  # Already subtracted stake when bet placed
-        reason = f"Bet #{bet_id} lost"
+        if status == BetStatus.WON:
+            change = stake + pnl  # Return stake plus winnings
+            reason = f"Bet #{bet_id} won (+{pnl:.2f})"
+        elif status == BetStatus.PUSH:
+            change = stake  # Return stake
+            reason = f"Bet #{bet_id} pushed"
+        else:
+            change = 0  # Already subtracted stake when bet placed
+            reason = f"Bet #{bet_id} lost"
 
-    if change != 0:
-        update_bankroll(current + change, change, reason, conn)
+        if change != 0:
+            update_bankroll(current + change, change, reason, conn)
 
     conn.commit()
     conn.close()
@@ -423,14 +425,16 @@ def cancel_bet(bet_id: int) -> float:
         raise ValueError(f"Bet {bet_id} is not pending (status: {row['status']})")
 
     stake = row["stake"]
+    is_auto = bool(row["is_auto"]) if "is_auto" in row.keys() else False
 
     # Update bet status
     cursor.execute("UPDATE bets SET status = ? WHERE id = ?", (BetStatus.CANCELLED.value, bet_id))
 
-    # Refund stake
-    cursor.execute("SELECT balance FROM bankroll_history ORDER BY id DESC LIMIT 1")
-    current = cursor.fetchone()["balance"]
-    update_bankroll(current + stake, stake, f"Bet #{bet_id} cancelled (refund)", conn)
+    # Refund stake only for manual bets (auto bets don't affect bankroll)
+    if not is_auto:
+        cursor.execute("SELECT balance FROM bankroll_history ORDER BY id DESC LIMIT 1")
+        current = cursor.fetchone()["balance"]
+        update_bankroll(current + stake, stake, f"Bet #{bet_id} cancelled (refund)", conn)
 
     conn.commit()
     conn.close()
