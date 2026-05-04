@@ -15,8 +15,11 @@ Memory-optimized for 8GB RAM systems.
 
 import argparse
 import gc
+import os
+import smtplib
 import sys
 from datetime import datetime, timedelta
+from email.mime.text import MIMEText
 from pathlib import Path
 
 # Add project root to path
@@ -55,6 +58,43 @@ def clear_mem():
 def log(msg: str):
     """Print timestamped log message."""
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+
+def send_failure_notification(error_msg: str, traceback_str: str = ""):
+    """Send email notification on pipeline failure."""
+    # Check for required env vars
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_pass = os.environ.get("SMTP_PASS")
+    notify_email = os.environ.get("NOTIFY_EMAIL", "mcgillies@shaw.ca")
+
+    if not all([smtp_host, smtp_user, smtp_pass]):
+        log("  Email notification skipped (SMTP_HOST/USER/PASS not configured)")
+        # Write failure to a marker file as fallback
+        failure_file = PROJECT_ROOT / "logs" / "pipeline_failure.txt"
+        with open(failure_file, "w") as f:
+            f.write(f"Pipeline failed at {datetime.now().isoformat()}\n")
+            f.write(f"Error: {error_msg}\n\n")
+            f.write(traceback_str)
+        log(f"  Failure logged to {failure_file}")
+        return
+
+    try:
+        msg = MIMEText(f"Daily pipeline failed at {datetime.now().isoformat()}\n\n"
+                       f"Error: {error_msg}\n\n"
+                       f"Traceback:\n{traceback_str}")
+        msg["Subject"] = "PitcherGamePreds Pipeline FAILED"
+        msg["From"] = smtp_user
+        msg["To"] = notify_email
+
+        with smtplib.SMTP(smtp_host, 587) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+
+        log(f"  Failure notification sent to {notify_email}")
+    except Exception as e:
+        log(f"  Failed to send email notification: {e}")
 
 
 def update_statcast_profiles(end_date: str = None):
@@ -132,9 +172,11 @@ def update_statcast_profiles(end_date: str = None):
             else:
                 data = new_pitches
 
-            # Save updated pitches
+            # Save updated pitches atomically (write to temp, then rename)
             log(f"  Saving updated pitches to {pitches_path}...")
-            data.to_parquet(pitches_path, index=False)
+            temp_path = pitches_path.with_suffix('.parquet.tmp')
+            data.to_parquet(temp_path, index=False)
+            temp_path.rename(pitches_path)  # Atomic on POSIX
             log(f"  Saved {len(data):,} pitches")
 
     if data.empty:
@@ -567,6 +609,34 @@ def retrain_models():
     clear_mem()
 
 
+def settle_auto_bets():
+    """Settle pending auto bets using newly updated stats."""
+    log("Settling pending auto bets...")
+
+    try:
+        from src.betting.settle_bets import settle_all_pending
+        from src.betting.auto_bet import get_auto_bet_summary
+
+        results = settle_all_pending()
+
+        if results:
+            wins = sum(1 for r in results if r['status'] == 'won')
+            losses = sum(1 for r in results if r['status'] == 'lost')
+            pushes = sum(1 for r in results if r['status'] == 'push')
+            total_pnl = sum(r['pnl'] for r in results)
+            log(f"  Settled {len(results)} bets: {wins}W-{losses}L-{pushes}P, P&L: ${total_pnl:+.2f}")
+        else:
+            log("  No bets to settle")
+
+        # Show current auto-bet performance
+        summary = get_auto_bet_summary()
+        log(f"  Auto-bet record: {summary['wins']}W-{summary['losses']}L-{summary['pushes']}P")
+        log(f"  Total P&L: ${summary['total_pnl']:+.2f} ({summary['roi']:.1f}% ROI)")
+
+    except Exception as e:
+        log(f"  Error settling bets: {e}")
+
+
 def restart_streamlit_app():
     """Restart the Streamlit app to pick up new models."""
     import subprocess
@@ -593,6 +663,7 @@ def main():
     parser.add_argument("--retrain", action="store_true", help="Retrain models after data update")
     parser.add_argument("--skip-profiles", action="store_true", help="Skip Statcast profiles update")
     parser.add_argument("--skip-rolling", action="store_true", help="Skip rolling stats update")
+    parser.add_argument("--skip-settle", action="store_true", help="Skip auto-bet settlement")
     args = parser.parse_args()
 
     log("=" * 60)
@@ -612,6 +683,13 @@ def main():
             retrain_models()
             clear_mem()
 
+        # Settle pending auto bets (after stats are updated)
+        if not args.skip_settle:
+            settle_auto_bets()
+
+        # Note: Auto bets are placed throughout the day via the Streamlit app
+        # (checks every 30 min during 10am-6pm MT when app is open)
+
         # Restart app to pick up new models
         restart_streamlit_app()
 
@@ -619,10 +697,22 @@ def main():
         log("Pipeline complete!")
         log("=" * 60)
 
+        # Write success marker (can be monitored for staleness)
+        success_file = PROJECT_ROOT / "logs" / "pipeline_last_success.txt"
+        with open(success_file, "w") as f:
+            f.write(datetime.now().isoformat())
+
+        # Clear any previous failure marker
+        failure_file = PROJECT_ROOT / "logs" / "pipeline_failure.txt"
+        if failure_file.exists():
+            failure_file.unlink()
+
     except Exception as e:
         log(f"Pipeline failed: {e}")
         import traceback
-        traceback.print_exc()
+        tb_str = traceback.format_exc()
+        print(tb_str)
+        send_failure_notification(str(e), tb_str)
         sys.exit(1)
 
 
