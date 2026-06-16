@@ -658,14 +658,49 @@ def restart_streamlit_app():
     log("  Streamlit app restarted")
 
 
+def run_step(step_name: str) -> bool:
+    """Run a single pipeline step. Returns True on success."""
+    log(f"Running step: {step_name}")
+
+    try:
+        if step_name == "profiles":
+            update_statcast_profiles()
+        elif step_name == "rolling":
+            update_rolling_stats()
+        elif step_name == "retrain":
+            retrain_models()
+        elif step_name == "settle":
+            settle_auto_bets()
+        elif step_name == "restart":
+            restart_streamlit_app()
+        else:
+            log(f"Unknown step: {step_name}")
+            return False
+
+        log(f"Step {step_name} complete")
+        return True
+    except Exception as e:
+        log(f"Step {step_name} failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Daily data pipeline")
     parser.add_argument("--retrain", action="store_true", help="Retrain models after data update")
     parser.add_argument("--skip-profiles", action="store_true", help="Skip Statcast profiles update")
     parser.add_argument("--skip-rolling", action="store_true", help="Skip rolling stats update")
     parser.add_argument("--skip-settle", action="store_true", help="Skip auto-bet settlement")
+    parser.add_argument("--step", type=str, help="Run single step: profiles, rolling, retrain, settle, restart")
     args = parser.parse_args()
 
+    # Single step mode - run one step and exit
+    if args.step:
+        success = run_step(args.step)
+        sys.exit(0 if success else 1)
+
+    # Full pipeline mode
     log("=" * 60)
     log("Starting daily pipeline")
     log("=" * 60)
@@ -686,9 +721,6 @@ def main():
         # Settle pending auto bets (after stats are updated)
         if not args.skip_settle:
             settle_auto_bets()
-
-        # Note: Auto bets are placed throughout the day via the Streamlit app
-        # (checks every 30 min during 10am-6pm MT when app is open)
 
         # Restart app to pick up new models
         restart_streamlit_app()

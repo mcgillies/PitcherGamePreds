@@ -21,8 +21,18 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 LOGS_DIR = PROJECT_ROOT / "logs"
 DATA_DIR = PROJECT_ROOT / "data" / "raw"
+MODELS_DIR = PROJECT_ROOT / "models"
+MONITOR_LOG = LOGS_DIR / "pipeline_monitor.log"
 
 STALE_HOURS = 36  # Alert if no success in this many hours
+MODEL_STALE_DAYS = 7  # Alert if models older than this
+
+
+def log_to_file(msg: str):
+    """Append timestamped message to monitor log."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(MONITOR_LOG, "a") as f:
+        f.write(f"[{timestamp}] {msg}\n")
 
 
 def send_notification(title: str, message: str):
@@ -80,16 +90,55 @@ def check_parquet_health() -> tuple[bool, str]:
         return False, f"Parquet corrupted or unreadable: {e}"
 
 
-def run_checks(verbose: bool = False) -> bool:
+def check_model_freshness() -> tuple[bool, str]:
+    """Check if models were updated recently."""
+    ensemble_dir = MODELS_DIR / "binary_ensemble"
+    metadata_path = ensemble_dir / "metadata.pkl"
+
+    if not metadata_path.exists():
+        return False, "Model metadata.pkl not found"
+
+    mtime = datetime.fromtimestamp(metadata_path.stat().st_mtime)
+    age = datetime.now() - mtime
+
+    if age > timedelta(days=MODEL_STALE_DAYS):
+        return False, f"Models stale - last trained {mtime.strftime('%Y-%m-%d')} ({age.days} days ago)"
+
+    return True, f"Models fresh - trained {mtime.strftime('%Y-%m-%d')}"
+
+
+def check_preprocessor_freshness() -> tuple[bool, str]:
+    """Check if preprocessor was updated recently."""
+    preprocessor_path = MODELS_DIR / "matchup_preprocessor.pkl"
+
+    if not preprocessor_path.exists():
+        return False, "Preprocessor not found"
+
+    mtime = datetime.fromtimestamp(preprocessor_path.stat().st_mtime)
+    age = datetime.now() - mtime
+
+    if age > timedelta(days=MODEL_STALE_DAYS):
+        return False, f"Preprocessor stale - last updated {mtime.strftime('%Y-%m-%d')} ({age.days} days ago)"
+
+    return True, f"Preprocessor fresh - updated {mtime.strftime('%Y-%m-%d')}"
+
+
+def run_checks(verbose: bool = False, log: bool = True) -> bool:
     """Run all health checks. Returns True if all pass."""
     checks = [
         ("Last Success", check_last_success),
         ("Failure Marker", check_failure_marker),
         ("Parquet Health", check_parquet_health),
+        ("Model Freshness", check_model_freshness),
+        ("Preprocessor", check_preprocessor_freshness),
     ]
 
     all_passed = True
     alerts = []
+
+    if log:
+        log_to_file("=" * 40)
+        log_to_file("Monitor check starting")
 
     for name, check_fn in checks:
         try:
@@ -101,9 +150,16 @@ def run_checks(verbose: bool = False) -> bool:
             status = "✓" if passed else "✗"
             print(f"{status} {name}: {message}")
 
+        if log:
+            status = "OK" if passed else "WARN"
+            log_to_file(f"{status}: {name} - {message}")
+
         if not passed:
             all_passed = False
             alerts.append(f"{name}: {message}")
+
+    if log:
+        log_to_file(f"Result: {'PASS' if all_passed else 'FAIL'}")
 
     return all_passed, alerts
 
